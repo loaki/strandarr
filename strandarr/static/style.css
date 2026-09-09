@@ -1,0 +1,150 @@
+html, body {
+  margin: 0;
+  height: 100%;
+  font-family: system-ui, sans-serif;
+  background: #111;
+}
+
+#map {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 110px;
+}
+
+#panel {
+  position: fixed;
+  top: 12px;
+  left: 12px;
+  z-index: 1;
+  background: rgba(17, 17, 17, 0.88);
+  color: #eee;
+  padding: 10px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  min-width: 190px;
+}
+
+#label {
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+#jump {
+  width: 100%;
+  margin-bottom: 8px;
+  background: #222;
+  color: #eee;
+  border: 1px solid #444;
+  border-radius: 4px;
+  padding: 3px 4px;
+  font-family: inherit;
+}
+
+.legend-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  color: #ccc;
+  cursor: pointer;
+  user-select: none;
+}
+
+.legend-row input {
+  margin: 0;
+  accent-color: #2b6cb0;
+}
+
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 1px solid #fff;
+}
+
+.count {
+  margin-left: auto;
+  color: #fff;
+  font-variant-numeric: tabular-nums;
+}
+
+#timeline {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 110px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  background: #181818;
+  border-top: 1px solid #333;
+  white-space: nowrap;
+}
+
+#track {
+  display: flex;
+  height: 100%;
+}
+
+.day {
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid #333;
+}
+
+.day-label {
+  text-align: center;
+  font-size: 11px;
+  color: #999;
+  padding: 4px 0;
+}
+
+.hours {
+  display: flex;
+  flex: 1;
+}
+
+.tick {
+  width: 22px;
+  flex: 0 0 22px;
+  border-right: 1px solid #222;
+  color: #666;
+  font-size: 9px;
+  text-align: center;
+  padding-top: 8px;
+  cursor: pointer;
+  box-sizing: border-box;
+}
+
+.tick:hover {
+  background: #292929;
+}
+
+.tick.selected {
+  background: #2b6cb0;
+  color: #fff;
+}
+
+.popup h4 {
+  margin: 0 0 6px;
+  font-size: 13px;
+}
+
+.popup table {
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.popup th {
+  text-align: left;
+  padding: 1px 8px 1px 0;
+  color: #666;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.popup td {
+  padding: 1px 0;
+}
