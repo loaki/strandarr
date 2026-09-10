@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     postgres_port: int = 5432
 
     gfw_api_token: str = ""
+    aisstream_api_key: str = ""
 
     @property
     def database_url(self) -> str:

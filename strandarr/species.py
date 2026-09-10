@@ -1,6 +1,5 @@
 import re
 
-# fmt: off
 SPECIES: tuple[tuple[str, str], ...] = (
     ("Delphinus delphis", "Dauphin commun"),
     ("Stenella coeruleoalba", "Dauphin bleu et blanc"),
@@ -72,7 +71,6 @@ SPECIES: tuple[tuple[str, str], ...] = (
     ("Otariidae", "Otarie ind."),
     ("Odobenus rosmarus", "Morse"),
 )
-# fmt: on
 
 SCIENTIFIC_TO_COMMON: dict[str, str] = dict(SPECIES)
 COMMON_TO_SCIENTIFIC: dict[str, str] = {common: sci for sci, common in SPECIES}

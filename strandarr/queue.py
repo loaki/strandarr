@@ -1,6 +1,8 @@
 import logging
+from datetime import timedelta
+from typing import Any, cast
 
-from sqlalchemy import select, update
+from sqlalchemy import CursorResult, or_, select, update
 from sqlalchemy.orm import Session
 
 from strandarr.models.base import utc_now
@@ -8,14 +10,18 @@ from strandarr.models.job import Job, JobStatus
 
 logger = logging.getLogger(__name__)
 
+MAX_ATTEMPTS = 3
+RETRY_DELAY = timedelta(minutes=1)
+
 
 def release_running(session: Session) -> int:
-    """Return jobs abandoned by a killed worker to the queue. Safe only at startup:
-    a running job belongs to a live worker, which this process has just replaced."""
-    released = session.execute(
-        update(Job)
-        .where(Job.status == JobStatus.RUNNING)
-        .values(status=JobStatus.PENDING, started_at=None)
+    released = cast(
+        "CursorResult[Any]",
+        session.execute(
+            update(Job)
+            .where(Job.status == JobStatus.RUNNING)
+            .values(status=JobStatus.PENDING, started_at=None)
+        ),
     ).rowcount
     session.commit()
     if released:
@@ -33,7 +39,10 @@ def enqueue(session: Session, kind: str, payload: dict) -> Job:
 def claim_next(session: Session) -> Job | None:
     stmt = (
         select(Job)
-        .where(Job.status == JobStatus.PENDING)
+        .where(
+            Job.status == JobStatus.PENDING,
+            or_(Job.started_at.is_(None), Job.started_at < utc_now() - RETRY_DELAY),
+        )
         .order_by(Job.created_at)
         .limit(1)
         .with_for_update(skip_locked=True)
@@ -54,8 +63,15 @@ def mark_done(session: Session, job: Job) -> None:
     session.commit()
 
 
-def mark_failed(session: Session, job: Job, error: str) -> None:
-    job.status = JobStatus.FAILED
+def retry_or_fail(session: Session, job: Job, error: str) -> bool:
+    """Queue the job for another attempt, or fail it for good once its turns are spent.
+    Returns whether it will run again."""
     job.error = error[:2000]
-    job.finished_at = utc_now()
+    retry = job.attempts < MAX_ATTEMPTS
+    if retry:
+        job.status = JobStatus.PENDING
+    else:
+        job.status = JobStatus.FAILED
+        job.finished_at = utc_now()
     session.commit()
+    return retry

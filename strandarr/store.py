@@ -1,3 +1,7 @@
+from collections.abc import Sequence
+from typing import cast
+
+from sqlalchemy import Table
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -6,17 +10,27 @@ from strandarr.models.base import Base
 MAX_QUERY_PARAMS = 60000
 
 
+def _table(model: type[Base]) -> Table:
+    """DeclarativeBase types __table__ as the general FromClause; every mapped class here
+    is backed by a real Table, which is what carries .indexes and .columns."""
+    return cast(Table, model.__table__)
+
+
 def _conflict_columns(model: type[Base]) -> list[str]:
-    for index in model.__table__.indexes:
+    for index in _table(model).indexes:
         if index.unique:
             return [column.name for column in index.columns]
     raise ValueError(f"{model.__name__} has no unique index to upsert on")
 
 
-def upsert(session: Session, model: type[Base], rows: list[Base], update: bool = False) -> None:
+def upsert(
+    session: Session, model: type[Base], rows: Sequence[Base], update: bool = False
+) -> None:
     if not rows:
         return
-    columns = [c.name for c in model.__table__.columns if c.name not in ("id", "created_at")]
+    columns = [
+        c.name for c in model.__table__.columns if c.name not in ("id", "created_at")
+    ]
     conflict = _conflict_columns(model)
 
     deduped = {
@@ -27,13 +41,17 @@ def upsert(session: Session, model: type[Base], rows: list[Base], update: bool =
     }
     values = list(deduped.values())
 
-    batch_size = max(1, MAX_QUERY_PARAMS // len(model.__table__.columns))
+    batch_size = max(1, MAX_QUERY_PARAMS // len(_table(model).columns))
     for start in range(0, len(values), batch_size):
         stmt = insert(model).values(values[start : start + batch_size])
         if update:
             stmt = stmt.on_conflict_do_update(
                 index_elements=conflict,
-                set_={name: stmt.excluded[name] for name in columns if name not in conflict},
+                set_={
+                    name: stmt.excluded[name]
+                    for name in columns
+                    if name not in conflict
+                },
             )
         else:
             stmt = stmt.on_conflict_do_nothing(index_elements=conflict)

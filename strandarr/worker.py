@@ -1,14 +1,16 @@
 import logging
 import time
-from datetime import date, timedelta
+from datetime import date
 from typing import Callable
 
 from sqlalchemy import select
+from sqlalchemy.exc import InterfaceError, OperationalError
 from sqlalchemy.orm import Session
 
 from strandarr import log, queue, store
 from strandarr.connectors import gbif, gfw, open_meteo, pelagis_histocarto
 from strandarr.db import Session as SessionFactory
+from strandarr.models.base import Base
 from strandarr.models.current_observation import CurrentObservation
 from strandarr.models.job import Job
 from strandarr.models.stranding import Stranding
@@ -19,6 +21,7 @@ from strandarr.schedule import BBOX, SOURCE_FISHING, grid_points, stored_days
 logger = logging.getLogger(__name__)
 
 POLL_SECONDS = 5
+DB_RETRY_SECONDS = 5
 
 
 def _window(payload: dict) -> tuple[date, date]:
@@ -34,9 +37,10 @@ def _ingest_gfw(session: Session, payload: dict, dataset: str, source: str) -> i
     )
     if skip:
         logger.info("%s: %d day(s) already stored, not re-requested", source, len(skip))
+
     return _ingest_chunks(
         session,
-        payload,
+        {**payload, "force": True},
         VesselPosition,
         gfw.iter_positions(dataset, source, BBOX, start, end, skip),
     )
@@ -46,7 +50,7 @@ def _ingest_vessel_positions(session: Session, payload: dict) -> int:
     return _ingest_gfw(session, payload, gfw.FISHING_DATASET, SOURCE_FISHING)
 
 
-def _ingest_chunks(session: Session, payload: dict, model: type, chunks) -> int:
+def _ingest_chunks(session: Session, payload: dict, model: type[Base], chunks) -> int:
     total = 0
     for rows in chunks:
         store.upsert(session, model, rows, update=payload.get("force", False))
@@ -55,28 +59,35 @@ def _ingest_chunks(session: Session, payload: dict, model: type, chunks) -> int:
     return total
 
 
-def _sea_points(session: Session, start: date, end: date) -> list[tuple[float, float]]:
-    """The marine model returns nothing on land, so current rows define the sea cells.
-    Scoped to this window so a mask left over from a coarser grid cannot pin wind to it.
+def _sea_points(session: Session) -> list[tuple[float, float]]:
+    """The cells the marine model actually answers for.
+
+    It returns nulls on land, so the current rows already stored are the sea mask: 942 of this
+    grid's 2457 cells, measured. The other 1515 were being requested on every run and coming
+    back empty -- 61% of the quota spent on land. Intersected with the live grid so a mask
+    left over from a coarser GRID_STEP_DEG cannot pin either source to it.
     """
     stored = set(
         session.execute(
-            select(CurrentObservation.lat, CurrentObservation.lon)
-            .where(
-                CurrentObservation.recorded_at >= start,
-                CurrentObservation.recorded_at < end + timedelta(days=1),
-            )
-            .distinct()
+            select(CurrentObservation.lat, CurrentObservation.lon).distinct()
         ).all()
     )
     points = [point for point in grid_points() if point in stored]
     return points or grid_points()
 
 
+def _requested_points(session: Session, payload: dict) -> list[tuple[float, float]]:
+    """`force` sweeps the whole grid again, which is how a cell that has become sea -- a model
+    coverage change, a finer grid -- gets back into the mask. Otherwise mask only."""
+    if payload.get("force", False):
+        return grid_points()
+    return _sea_points(session)
+
+
 def _ingest_wind(session: Session, payload: dict) -> int:
     start, end = _window(payload)
-    points = _sea_points(session, start, end)
-    logger.info("wind: %d of %d grid cells are sea", len(points), len(grid_points()))
+    points = _requested_points(session, payload)
+    logger.info("wind: requesting %d of %d grid cells", len(points), len(grid_points()))
     return _ingest_chunks(
         session, payload, WindObservation, open_meteo.iter_wind(points, start, end)
     )
@@ -84,8 +95,15 @@ def _ingest_wind(session: Session, payload: dict) -> int:
 
 def _ingest_currents(session: Session, payload: dict) -> int:
     start, end = _window(payload)
+    points = _requested_points(session, payload)
+    logger.info(
+        "currents: requesting %d of %d grid cells", len(points), len(grid_points())
+    )
     return _ingest_chunks(
-        session, payload, CurrentObservation, open_meteo.iter_currents(grid_points(), start, end)
+        session,
+        payload,
+        CurrentObservation,
+        open_meteo.iter_currents(points, start, end),
     )
 
 
@@ -133,8 +151,16 @@ def run_pending(session: Session) -> int:
             rows = run_job(session, job)
         except Exception as exc:
             session.rollback()
-            queue.mark_failed(session, job, str(exc))
-            logger.error("job %d %s failed: %s", job.id, job.kind, exc)
+            retry = queue.retry_or_fail(session, job, str(exc))
+            logger.error(
+                "job %d %s failed (attempt %d/%d), %s: %s",
+                job.id,
+                job.kind,
+                job.attempts,
+                queue.MAX_ATTEMPTS,
+                "queued for retry" if retry else "giving up",
+                exc,
+            )
         else:
             queue.mark_done(session, job)
             logger.info(
@@ -149,11 +175,23 @@ def run_pending(session: Session) -> int:
 
 def run_forever() -> None:
     logger.info("worker started, polling every %ds", POLL_SECONDS)
-    with SessionFactory() as session:
-        queue.release_running(session)
+    reconnected = True
     while True:
-        with SessionFactory() as session:
-            processed = run_pending(session)
+        try:
+            with SessionFactory() as session:
+                if reconnected:
+                    queue.release_running(session)
+                    reconnected = False
+                processed = run_pending(session)
+        except (OperationalError, InterfaceError) as exc:
+            reconnected = True
+            logger.warning(
+                "database unavailable (%s), retrying in %ds",
+                exc.orig or exc,
+                DB_RETRY_SECONDS,
+            )
+            time.sleep(DB_RETRY_SECONDS)
+            continue
         if not processed:
             time.sleep(POLL_SECONDS)
 

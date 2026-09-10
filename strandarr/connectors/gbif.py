@@ -39,6 +39,10 @@ def fetch_strandings(
                     "offset": offset,
                 },
             )
+            if not isinstance(page, dict):
+                raise RuntimeError(
+                    f"gbif: expected an object, got {type(page).__name__}"
+                )
             for occurrence in page["results"]:
                 stranding = _parse(occurrence)
                 if stranding is not None:
@@ -50,14 +54,34 @@ def fetch_strandings(
     return strandings
 
 
+def _event_date(event_date: str) -> datetime | None:
+    """GBIF eventDate is free-ish text: a plain date, a timestamp with or without offset,
+    or a range ("2020-01-01/2020-01-05"), of which we take the start. Anything else -- a
+    month-only value, an empty interval -- is unusable, and one bad record must not fail
+    the whole page."""
+    value = event_date.split("/", 1)[0].strip()
+    try:
+        recorded_at = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if recorded_at.tzinfo is None:
+        return recorded_at.replace(tzinfo=timezone.utc)
+    return recorded_at.astimezone(timezone.utc)
+
+
 def _parse(occurrence: dict) -> Stranding | None:
     lat, lon = occurrence.get("decimalLatitude"), occurrence.get("decimalLongitude")
     event_date = occurrence.get("eventDate")
     if lat is None or lon is None or not event_date:
         return None
-    recorded_at = datetime.fromisoformat(event_date[:19])
-    if recorded_at.tzinfo is None:
-        recorded_at = recorded_at.replace(tzinfo=timezone.utc)
+    recorded_at = _event_date(event_date)
+    if recorded_at is None:
+        logger.warning(
+            "gbif: skipping %s, unusable eventDate %r",
+            occurrence.get("key"),
+            event_date,
+        )
+        return None
     scientific, common = species.from_scientific(
         occurrence.get("species") or occurrence.get("scientificName")
     )

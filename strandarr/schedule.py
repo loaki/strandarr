@@ -1,10 +1,12 @@
 import logging
+from dataclasses import dataclass
 from datetime import date, timedelta
 
 from sqlalchemy import Date, cast, func, select
 from sqlalchemy.orm import Session
 
 from strandarr import queue
+from strandarr.models.base import Observation, SourcedObservation
 from strandarr.models.current_observation import CurrentObservation
 from strandarr.models.vessel_position import VesselPosition
 from strandarr.models.wind_observation import WindObservation
@@ -12,27 +14,68 @@ from strandarr.models.wind_observation import WindObservation
 logger = logging.getLogger(__name__)
 
 BBOX = (-6.0, 42.0, 9.5, 51.5)
-# Both upstream models resolve to ~0.07-0.08 deg (~8-9 km), measured by probing which
-# coordinates they snap requests to; a finer grid than that returns duplicated values.
+
 GRID_STEP_DEG = 0.25
 DEFAULT_BACKFILL_DAYS = 14
 
-# Open-Meteo's marine model (currents) has no data before this date; it is the binding
-# constraint, so every source is clamped to it to keep the series aligned.
-MIN_DATE = date(2022, 1, 1)
-
 SOURCE_FISHING = "gfw_fishing"
+SOURCE_AIS_LIVE = "ais_live"
 
-# GFW publishes with a few days' delay; requesting newer days returns 0 rows, and gap
-# detection would otherwise re-request them on every run and exhaust the API rate limit.
-GFW_LAG_DAYS = 5
 
-# Currents are enqueued before wind: they define which grid cells are sea, and wind
-# uses that to skip inland cells.
-WINDOW_SOURCES = (
-    ("ingest_vessel_positions", VesselPosition, SOURCE_FISHING, GFW_LAG_DAYS),
-    ("ingest_currents", CurrentObservation, None, 0),
-    ("ingest_wind", WindObservation, None, 0),
+@dataclass(frozen=True)
+class SourceSpec:
+    """One ingest source and the window it can actually answer for.
+
+    Every source is clamped to its own coverage rather than to a project-wide floor, so a
+    request outside it is trimmed instead of silently returning nothing -- and asking for
+    strandings back to 1934 does not get pulled forward to where the forcing data starts.
+
+    model/source drive per-day gap detection: with a model set, days already stored are not
+    re-requested. Strandings leave it None because a day with no stranding is normal and
+    indistinguishable from a day never fetched, and because upstream revises records.
+    """
+
+    kind: str
+    first_day: date
+    model: type[Observation] | None = None
+    source: str | None = None
+    lag_days: int = 0
+    last_day: date | None = None
+
+    def window(self, start: date, end: date) -> tuple[date, date] | None:
+        available = date.today() - timedelta(days=self.lag_days)
+        first = max(start, self.first_day)
+        last = min(end, available, self.last_day or date.max)
+        return (first, last) if first <= last else None
+
+
+SOURCES = (
+    SourceSpec(
+        kind="ingest_vessel_positions",
+        first_day=date(2012, 1, 1),
+        model=VesselPosition,
+        source=SOURCE_FISHING,
+        lag_days=4,
+    ),
+    SourceSpec(
+        kind="ingest_currents",
+        first_day=date(2022, 1, 1),
+        model=CurrentObservation,
+    ),
+    SourceSpec(
+        kind="ingest_wind",
+        first_day=date(2022, 1, 1),
+        model=WindObservation,
+    ),
+    SourceSpec(
+        kind="ingest_strandings",
+        first_day=date(1934, 1, 1),
+        last_day=date(2022, 12, 31),
+    ),
+    SourceSpec(
+        kind="ingest_strandings_histocarto",
+        first_day=date(2023, 1, 1),
+    ),
 )
 
 
@@ -50,7 +93,11 @@ def grid_points() -> list[tuple[float, float]]:
 
 
 def stored_days(
-    session: Session, model: type, start: date, end: date, source: str | None
+    session: Session,
+    model: type[Observation],
+    start: date,
+    end: date,
+    source: str | None,
 ) -> set[date]:
     day = cast(func.timezone("UTC", model.recorded_at), Date)
     stmt = (
@@ -59,11 +106,15 @@ def stored_days(
         .distinct()
     )
     if source is not None:
+        if not issubclass(model, SourcedObservation):
+            raise TypeError(f"{model.__name__} has no source column to filter on")
         stmt = stmt.where(model.source == source)
     return set(session.execute(stmt).scalars())
 
 
-def _missing_ranges(start: date, end: date, stored: set[date]) -> list[tuple[date, date]]:
+def _missing_ranges(
+    start: date, end: date, stored: set[date]
+) -> list[tuple[date, date]]:
     ranges: list[tuple[date, date]] = []
     day = start
     while day <= end:
@@ -77,6 +128,19 @@ def _missing_ranges(start: date, end: date, stored: set[date]) -> list[tuple[dat
     return ranges
 
 
+def _ranges_for(
+    session: Session, spec: SourceSpec, start: date, end: date, force: bool
+) -> list[tuple[date, date]]:
+    if force or spec.model is None:
+        return [(start, end)]
+    stored = stored_days(session, spec.model, start, end, spec.source)
+    ranges = _missing_ranges(start, end, stored)
+    skipped = (end - start).days + 1 - sum((r[1] - r[0]).days + 1 for r in ranges)
+    if skipped:
+        logger.info("%s: %d day(s) already stored, skipped", spec.kind, skipped)
+    return ranges
+
+
 def schedule_missing(
     session: Session,
     start: date | None = None,
@@ -85,32 +149,34 @@ def schedule_missing(
 ) -> int:
     window_end = end or date.today()
     window_start = start or window_end - timedelta(days=DEFAULT_BACKFILL_DAYS)
-    if window_start < MIN_DATE:
-        logger.info("clamping start %s to %s (earliest date all sources cover)", window_start, MIN_DATE)
-        window_start = MIN_DATE
     if window_start > window_end:
         raise ValueError(f"start {window_start} is after end {window_end}")
 
     count = 0
-    for kind, model, source, lag in WINDOW_SOURCES:
-        source_end = min(window_end, date.today() - timedelta(days=lag))
-        if source_end < window_start:
-            logger.info("%s: nothing to request, upstream lags %d day(s)", kind, lag)
-            continue
-        if force:
-            ranges = [(window_start, source_end)]
-        else:
-            stored = stored_days(session, model, window_start, source_end, source)
-            ranges = _missing_ranges(window_start, source_end, stored)
-            skipped = (source_end - window_start).days + 1 - sum(
-                (r[1] - r[0]).days + 1 for r in ranges
+    for spec in SOURCES:
+        window = spec.window(window_start, window_end)
+        if window is None:
+            logger.info(
+                "%s: nothing to request, %s..%s is outside its coverage",
+                spec.kind,
+                window_start,
+                window_end,
             )
-            if skipped:
-                logger.info("%s: %d day(s) already stored, skipped", kind, skipped)
-        for range_start, range_end in ranges:
+            continue
+        source_start, source_end = window
+        if (source_start, source_end) != (window_start, window_end):
+            logger.info(
+                "%s: clamped to its coverage, %s..%s",
+                spec.kind,
+                source_start,
+                source_end,
+            )
+        for range_start, range_end in _ranges_for(
+            session, spec, source_start, source_end, force
+        ):
             queue.enqueue(
                 session,
-                kind,
+                spec.kind,
                 {
                     "start": range_start.isoformat(),
                     "end": range_end.isoformat(),
@@ -118,18 +184,6 @@ def schedule_missing(
                 },
             )
             count += 1
-
-    for kind in ("ingest_strandings", "ingest_strandings_histocarto"):
-        queue.enqueue(
-            session,
-            kind,
-            {
-                "start": window_start.isoformat(),
-                "end": window_end.isoformat(),
-                "force": force,
-            },
-        )
-        count += 1
 
     session.commit()
     logger.info("enqueued %d jobs for %s..%s", count, window_start, window_end)

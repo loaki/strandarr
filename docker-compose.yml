@@ -54,6 +54,19 @@ services:
       migrate:
         condition: service_completed_successfully
 
+  aisstream:
+    build: .
+    restart: unless-stopped
+    stop_grace_period: 30s
+    env_file: .env
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+    command: ["python", "-m", "strandarr.aisstream"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
   pgadmin:
     image: dpage/pgadmin4
     restart: unless-stopped

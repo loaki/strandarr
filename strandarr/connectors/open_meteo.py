@@ -14,13 +14,26 @@ WEATHER_URL = "https://archive-api.open-meteo.com/v1/archive"
 MARINE_URL = "https://marine-api.open-meteo.com/v1/marine"
 WIND_HOURLY = "windspeed_10m,winddirection_10m"
 CURRENT_HOURLY = "ocean_current_velocity,ocean_current_direction"
-POINTS_PER_REQUEST = 50
+# Open-Meteo bills 1.0 API call for a request of <=10 variables covering <=14 days, whatever
+# number of locations it carries, and charges pro rata beyond that (their example: "4 weeks of
+# data equals 3.0 API calls"). So 14 days is the widest window still costing a single call,
+# and locations are free -- which makes the quota-optimal request as wide as the URL allows.
+# Measured against the live API: 500 locations is accepted (7.4kB URL), 1000 returns
+# "414 Request-URI Too Large" (14.5kB). 200 keeps the URL near 3kB with plenty of headroom.
+#
+# Rows are yielded once per request rather than accumulated, so peak memory is bounded by one
+# request's worth -- POINTS_PER_REQUEST x DAYS_PER_REQUEST x 24, about 67k rows -- however
+# long the backfill is.
+POINTS_PER_REQUEST = 200
+DAYS_PER_REQUEST = 14
 
 
 def iter_wind(
     points: list[tuple[float, float]], start: date, end: date
 ) -> Iterator[list[WindObservation]]:
-    yield from _iter(WEATHER_URL, WIND_HOURLY, WindObservation, "wind", points, start, end)
+    yield from _iter(
+        WEATHER_URL, WIND_HOURLY, WindObservation, "wind", points, start, end
+    )
 
 
 def iter_currents(
@@ -31,15 +44,12 @@ def iter_currents(
     )
 
 
-def month_chunks(start: date, end: date) -> Iterator[tuple[date, date]]:
+def date_chunks(start: date, end: date) -> Iterator[tuple[date, date]]:
     cursor = start
     while cursor <= end:
-        if cursor.month == 12:
-            following = date(cursor.year + 1, 1, 1)
-        else:
-            following = date(cursor.year, cursor.month + 1, 1)
-        yield cursor, min(end, following - timedelta(days=1))
-        cursor = following
+        chunk_end = min(end, cursor + timedelta(days=DAYS_PER_REQUEST - 1))
+        yield cursor, chunk_end
+        cursor = chunk_end + timedelta(days=1)
 
 
 def _iter(
@@ -53,22 +63,39 @@ def _iter(
 ) -> Iterator[list]:
     speed_key, direction_key = hourly.split(",")
     with httpx.Client(timeout=180) as client:
-        for chunk_start, chunk_end in month_chunks(start, end):
-            rows = [
-                model(recorded_at=at, lat=lat, lon=lon, speed=speed, direction=direction)
-                for lat, lon, at, speed, direction in _fetch(
-                    client, url, hourly, speed_key, direction_key, points, chunk_start, chunk_end
+        for chunk_start, chunk_end in date_chunks(start, end):
+            for offset in range(0, len(points), POINTS_PER_REQUEST):
+                batch = points[offset : offset + POINTS_PER_REQUEST]
+                rows = [
+                    model(
+                        recorded_at=at,
+                        lat=lat,
+                        lon=lon,
+                        speed=speed,
+                        direction=direction,
+                    )
+                    for lat, lon, at, speed, direction in _fetch(
+                        client,
+                        url,
+                        hourly,
+                        speed_key,
+                        direction_key,
+                        batch,
+                        chunk_start,
+                        chunk_end,
+                    )
+                ]
+                logger.info(
+                    "open_meteo %s: %s..%s, cells %d-%d of %d -> %d rows",
+                    label,
+                    chunk_start,
+                    chunk_end,
+                    offset + 1,
+                    offset + len(batch),
+                    len(points),
+                    len(rows),
                 )
-            ]
-            logger.info(
-                "open_meteo %s: %s..%s, %d points -> %d rows",
-                label,
-                chunk_start,
-                chunk_end,
-                len(points),
-                len(rows),
-            )
-            yield rows
+                yield rows
 
 
 def _fetch(
@@ -77,29 +104,30 @@ def _fetch(
     hourly: str,
     speed_key: str,
     direction_key: str,
-    points: list[tuple[float, float]],
+    batch: list[tuple[float, float]],
     start: date,
     end: date,
 ) -> list[tuple[float, float, datetime, float, float]]:
-    out = []
-    for offset in range(0, len(points), POINTS_PER_REQUEST):
-        batch = points[offset : offset + POINTS_PER_REQUEST]
-        payload = request_json(
-            client,
-            "GET",
-            url,
-            params={
-                "latitude": ",".join(str(lat) for lat, _ in batch),
-                "longitude": ",".join(str(lon) for _, lon in batch),
-                "start_date": start.isoformat(),
-                "end_date": end.isoformat(),
-                "hourly": hourly,
-                "timezone": "UTC",
-            },
-        )
-        locations = payload if isinstance(payload, list) else [payload]
-        for (lat, lon), location in zip(batch, locations):
-            out.extend(_parse_location(location, lat, lon, speed_key, direction_key))
+    """One request, one location batch. The caller yields per call, so nothing accumulates."""
+    payload = request_json(
+        client,
+        "GET",
+        url,
+        # Open-Meteo's minutely ceiling counts locations, so this is what paces the requests.
+        cost=len(batch),
+        params={
+            "latitude": ",".join(str(lat) for lat, _ in batch),
+            "longitude": ",".join(str(lon) for _, lon in batch),
+            "start_date": start.isoformat(),
+            "end_date": end.isoformat(),
+            "hourly": hourly,
+            "timezone": "UTC",
+        },
+    )
+    locations = payload if isinstance(payload, list) else [payload]
+    out: list[tuple[float, float, datetime, float, float]] = []
+    for (lat, lon), location in zip(batch, locations):
+        out.extend(_parse_location(location, lat, lon, speed_key, direction_key))
     return out
 
 
@@ -112,7 +140,13 @@ def _parse_location(
     if not hourly:
         return []
     return [
-        (lat, lon, datetime.fromisoformat(at).replace(tzinfo=timezone.utc), speed, direction)
+        (
+            lat,
+            lon,
+            datetime.fromisoformat(at).replace(tzinfo=timezone.utc),
+            speed,
+            direction,
+        )
         for at, speed, direction in zip(
             hourly["time"], hourly[speed_key], hourly[direction_key]
         )

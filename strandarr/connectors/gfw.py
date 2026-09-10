@@ -42,10 +42,44 @@ def iter_positions(
                 json=_body(bbox),
             )
             rows = _flatten(payload)
-            positions = [p for p in (_parse(row, source) for row in rows) if p is not None]
-            logger.info("gfw %s: %s -> %d positions", source, day, len(positions))
+            parsed = [p for p in (_parse(row, source) for row in rows) if p is not None]
+            positions = _collapse_cells(parsed)
+            logger.info(
+                "gfw %s: %s -> %d positions from %d grid cells",
+                source,
+                day,
+                len(positions),
+                len(parsed),
+            )
             yield positions
             day += timedelta(days=1)
+
+
+def _collapse_cells(positions: list[VesselPosition]) -> list[VesselPosition]:
+    """One row per vessel-hour, which is what the dedup index stores.
+
+    At HIGH spatial resolution a vessel that moves during the hour is reported in several
+    grid cells. Keep the cell it spent the most of the hour in and carry the summed effort,
+    so the position is the vessel's centre of activity and no fishing hours are lost.
+    Without this the rows collide on (mmsi, recorded_at, source) and the upsert silently
+    keeps an arbitrary cell.
+    """
+    kept: dict[tuple[str, datetime], VesselPosition] = {}
+    best_effort: dict[tuple[str, datetime], float] = {}
+    for position in positions:
+        key = (position.mmsi, position.recorded_at)
+        effort = position.effort_hours or 0.0
+        current = kept.get(key)
+        if current is None:
+            kept[key] = position
+            best_effort[key] = effort
+            continue
+        total = (current.effort_hours or 0.0) + effort
+        if effort > best_effort[key]:
+            kept[key] = position
+            best_effort[key] = effort
+        kept[key].effort_hours = total
+    return list(kept.values())
 
 
 def _params(dataset: str, day: date) -> dict:

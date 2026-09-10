@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import re
 from datetime import date, datetime, timezone
@@ -17,7 +18,9 @@ ALL_FACADES = (
     "988_986_987_989_984S_976_974_984T_973_975_971_972_977_978"
 )
 
-EVENT_LINE = re.compile(r"^\s*(\d{4}-\d{2}-\d{2})\s*/\s*(\d+)\s*/\s*([^/]+?)\s*/\s*(.+?)\s*$")
+EVENT_LINE = re.compile(
+    r"^\s*(\d{4}-\d{2}-\d{2})\s*/\s*(\d+)\s*/\s*([^/]+?)\s*/\s*(.+?)\s*$"
+)
 
 
 def fetch_strandings(
@@ -47,6 +50,20 @@ def fetch_strandings(
     return strandings
 
 
+def _identity(
+    lat: float, lon: float, day: str, common: str, commune: str, index: int
+) -> str:
+    """Stable id for an event that carries no id of its own.
+
+    Hashed from what identifies the event and nothing that can be revised, so a corrected
+    individual count updates the row instead of inserting a second one. `index` distinguishes
+    repeats within one map cell, whose event list belongs to the cell rather than to our
+    query, so the numbering does not shift when the requested window changes.
+    """
+    payload = f"{lat:.5f}|{lon:.5f}|{day}|{common}|{commune}|{index}"
+    return hashlib.sha256(payload.encode()).hexdigest()[:32]
+
+
 def _parse(raw: str, bbox: tuple[float, float, float, float]) -> list[Stranding]:
     min_lon, min_lat, max_lon, max_lat = bbox
     seen: dict[tuple, int] = {}
@@ -68,14 +85,16 @@ def _parse(raw: str, bbox: tuple[float, float, float, float]) -> list[Stranding]
             day, count, species_raw, place = match.groups()
             scientific, common = species.from_common(species_raw)
             commune = place.partition(",")[0].strip()
-            key = (day, common, commune)
+            key = (lat, lon, day, common, commune)
             index = seen.get(key, 0)
             seen[key] = index + 1
             out.append(
                 Stranding(
-                    external_id=f"{day}|{common}|{commune}|{index}",
+                    external_id=_identity(lat, lon, day, common, commune, index),
                     source="pelagis_histocarto",
-                    recorded_at=datetime.fromisoformat(day).replace(tzinfo=timezone.utc),
+                    recorded_at=datetime.fromisoformat(day).replace(
+                        tzinfo=timezone.utc
+                    ),
                     lat=lat,
                     lon=lon,
                     species_scientific=scientific,

@@ -7,7 +7,13 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session as SessionType
 
 from strandarr.db import Session
-from strandarr.models import CurrentObservation, Stranding, VesselPosition, WindObservation
+from strandarr.models import (
+    CurrentObservation,
+    Stranding,
+    VesselPosition,
+    WindObservation,
+)
+from strandarr.models.base import Observation
 from strandarr.schedule import GRID_STEP_DEG
 
 app = FastAPI(title="strandarr")
@@ -15,10 +21,13 @@ app = FastAPI(title="strandarr")
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
-def _bounds(session: SessionType, model: type) -> tuple[datetime | None, datetime | None]:
-    return session.execute(
+def _bounds(
+    session: SessionType, model: type[Observation]
+) -> tuple[datetime | None, datetime | None]:
+    low, high = session.execute(
         select(func.min(model.recorded_at), func.max(model.recorded_at))
     ).one()
+    return low, high
 
 
 @app.get("/api/range")
@@ -38,12 +47,17 @@ def get_range() -> dict:
     }
 
 
-def _hour_points(model: type, hour: datetime, fields: list[str]) -> list[dict]:
+def _hour_points(
+    model: type[Observation], hour: datetime, fields: list[str]
+) -> list[dict]:
     with Session() as session:
         stmt = select(model).where(
             model.recorded_at >= hour, model.recorded_at < hour + timedelta(hours=1)
         )
-        return [{f: getattr(row, f) for f in fields} for row in session.execute(stmt).scalars()]
+        return [
+            {f: getattr(row, f) for f in fields}
+            for row in session.execute(stmt).scalars()
+        ]
 
 
 @app.get("/api/vessels")
@@ -80,7 +94,9 @@ def get_strandings(day: date = Query(...)) -> list[dict]:
     start = datetime.combine(day, datetime.min.time())
     end = start + timedelta(days=1)
     with Session() as session:
-        stmt = select(Stranding).where(Stranding.recorded_at >= start, Stranding.recorded_at < end)
+        stmt = select(Stranding).where(
+            Stranding.recorded_at >= start, Stranding.recorded_at < end
+        )
         return [
             {
                 "lat": row.lat,
