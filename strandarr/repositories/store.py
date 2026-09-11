@@ -32,7 +32,8 @@ def upsert(
     }
     values = list(deduped.values())
 
-    batch_size = max(1, MAX_QUERY_PARAMS // len(columns))
+    max_params_per_row = len(table.columns)
+    batch_size = max(1, MAX_QUERY_PARAMS // max_params_per_row)
     for start in range(0, len(values), batch_size):
         statement = insert(model).values(values[start : start + batch_size])
         if overwrite:
