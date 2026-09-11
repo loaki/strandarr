@@ -1,35 +1,41 @@
 import logging
-from dataclasses import dataclass
-from datetime import date, timedelta
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta
+from typing import Any
 
-from sqlalchemy import Date, cast, func, select
+from sqlalchemy import ColumnElement, SQLColumnExpression
 from sqlalchemy.orm import Session
 
-from strandarr.models.base import Observation, SourcedObservation
-from strandarr.models.current_observation import CurrentObservation
-from strandarr.models.vessel_position import VesselPosition
-from strandarr.models.wind_observation import WindObservation
+from strandarr import sources
+from strandarr.connectors import open_meteo
+from strandarr.models import MarineCondition, VesselPosition
 from strandarr.repositories import queue
+from strandarr.services import handlers
+from strandarr.services.coverage import missing_ranges, stored_days
+from strandarr.services.handlers import Handler
 
 logger = logging.getLogger(__name__)
 
-BBOX = (-6.0, 42.0, 9.5, 51.5)
-
-GRID_STEP_DEG = 0.25
 DEFAULT_BACKFILL_DAYS = 14
+GFW_LAG_DAYS = 4
 
-SOURCE_FISHING = "gfw_fishing"
-SOURCE_AIS_LIVE = "ais_live"
+ERA5_FIRST_DAY = date(1940, 1, 1)
+MARINE_ARCHIVE_FIRST_DAY = date(2022, 1, 1)
+GBIF_LAST_DAY = date(2022, 12, 31)
+HISTOCARTO_FIRST_DAY = date(2023, 1, 1)
+GFW_FIRST_DAY = date(2012, 1, 1)
 
 
-@dataclass(frozen=True)
-class SourceSpec:
+@dataclass(frozen=True, eq=False)
+class Source:
     kind: str
-    first_day: date
-    model: type[Observation] | None = None
-    source: str | None = None
+    handler: Handler
+    first_day: date = date.min
+    when: SQLColumnExpression[datetime] | None = None
+    filters: tuple[ColumnElement[bool], ...] = field(default=())
     lag_days: int = 0
     last_day: date | None = None
+    rolling: bool = False
 
     def window(self, start: date, end: date) -> tuple[date, date] | None:
         available = date.today() - timedelta(days=self.lag_days)
@@ -39,95 +45,46 @@ class SourceSpec:
 
 
 SOURCES = (
-    SourceSpec(
+    Source(
         kind="ingest_vessel_positions",
-        first_day=date(2012, 1, 1),
-        model=VesselPosition,
-        source=SOURCE_FISHING,
-        lag_days=4,
+        handler=handlers.vessel_positions,
+        first_day=GFW_FIRST_DAY,
+        when=VesselPosition.recorded_at,
+        filters=(VesselPosition.source == sources.GFW_FISHING,),
+        lag_days=GFW_LAG_DAYS,
     ),
-    SourceSpec(
-        kind="ingest_currents",
-        first_day=date(2022, 1, 1),
-        model=CurrentObservation,
+    Source(
+        kind="ingest_weather_archive",
+        handler=handlers.archive(open_meteo.WEATHER_ARCHIVE),
+        first_day=ERA5_FIRST_DAY,
+        when=MarineCondition.valid_at,
+        filters=(MarineCondition.source == sources.WEATHER_ARCHIVE,),
     ),
-    SourceSpec(
-        kind="ingest_wind",
-        first_day=date(2022, 1, 1),
-        model=WindObservation,
+    Source(
+        kind="ingest_marine_archive",
+        handler=handlers.archive(open_meteo.MARINE_ARCHIVE),
+        first_day=MARINE_ARCHIVE_FIRST_DAY,
+        when=MarineCondition.valid_at,
+        filters=(MarineCondition.source == sources.MARINE_ARCHIVE,),
     ),
-    SourceSpec(
-        kind="ingest_strandings",
-        first_day=date(1934, 1, 1),
-        last_day=date(2022, 12, 31),
+    Source(
+        kind="ingest_strandings_gbif",
+        handler=handlers.strandings_gbif,
+        last_day=GBIF_LAST_DAY,
     ),
-    SourceSpec(
+    Source(
         kind="ingest_strandings_histocarto",
-        first_day=date(2023, 1, 1),
+        handler=handlers.strandings_histocarto,
+        first_day=HISTOCARTO_FIRST_DAY,
+    ),
+    Source(
+        kind="ingest_forecast",
+        handler=handlers.forecast,
+        rolling=True,
     ),
 )
 
-
-def grid_points() -> list[tuple[float, float]]:
-    min_lon, min_lat, max_lon, max_lat = BBOX
-    points = []
-    lat = min_lat
-    while lat <= max_lat:
-        lon = min_lon
-        while lon <= max_lon:
-            points.append((round(lat, 3), round(lon, 3)))
-            lon += GRID_STEP_DEG
-        lat += GRID_STEP_DEG
-    return points
-
-
-def stored_days(
-    session: Session,
-    model: type[Observation],
-    start: date,
-    end: date,
-    source: str | None,
-) -> set[date]:
-    day = cast(func.timezone("UTC", model.recorded_at), Date)
-    stmt = (
-        select(day)
-        .where(model.recorded_at >= start, model.recorded_at < end + timedelta(days=1))
-        .distinct()
-    )
-    if source is not None:
-        if not issubclass(model, SourcedObservation):
-            raise TypeError(f"{model.__name__} has no source column to filter on")
-        stmt = stmt.where(model.source == source)
-    return set(session.execute(stmt).scalars())
-
-
-def _missing_ranges(
-    start: date, end: date, stored: set[date]
-) -> list[tuple[date, date]]:
-    ranges: list[tuple[date, date]] = []
-    day = start
-    while day <= end:
-        if day in stored:
-            day += timedelta(days=1)
-            continue
-        run_start = day
-        while day <= end and day not in stored:
-            day += timedelta(days=1)
-        ranges.append((run_start, day - timedelta(days=1)))
-    return ranges
-
-
-def _ranges_for(
-    session: Session, spec: SourceSpec, start: date, end: date, force: bool
-) -> list[tuple[date, date]]:
-    if force or spec.model is None:
-        return [(start, end)]
-    stored = stored_days(session, spec.model, start, end, spec.source)
-    ranges = _missing_ranges(start, end, stored)
-    skipped = (end - start).days + 1 - sum((r[1] - r[0]).days + 1 for r in ranges)
-    if skipped:
-        logger.info("%s: %d day(s) already stored, skipped", spec.kind, skipped)
-    return ranges
+BY_KIND = {source.kind: source for source in SOURCES}
 
 
 def schedule_missing(
@@ -142,38 +99,80 @@ def schedule_missing(
         raise ValueError(f"start {window_start} is after end {window_end}")
 
     count = 0
-    for spec in SOURCES:
-        window = spec.window(window_start, window_end)
-        if window is None:
-            logger.info(
-                "%s: nothing to request, %s..%s is outside its coverage",
-                spec.kind,
-                window_start,
-                window_end,
-            )
-            continue
-        source_start, source_end = window
-        if (source_start, source_end) != (window_start, window_end):
-            logger.info(
-                "%s: clamped to its coverage, %s..%s",
-                spec.kind,
-                source_start,
-                source_end,
-            )
-        for range_start, range_end in _ranges_for(
-            session, spec, source_start, source_end, force
-        ):
-            queue.enqueue(
-                session,
-                spec.kind,
-                {
-                    "start": range_start.isoformat(),
-                    "end": range_end.isoformat(),
-                    "force": force,
-                },
-            )
+    for source in SOURCES:
+        queued = {
+            _window_key(payload)
+            for payload in queue.unfinished_payloads(session, source.kind)
+        }
+        skipped = 0
+        for payload in _payloads(session, source, window_start, window_end, force):
+            if _window_key(payload) in queued:
+                skipped += 1
+                continue
+            queue.enqueue(session, source.kind, payload)
             count += 1
+        if skipped:
+            logger.info(
+                "%s: %d range(s) already queued, not enqueued again",
+                source.kind,
+                skipped,
+            )
 
     session.commit()
     logger.info("enqueued %d jobs for %s..%s", count, window_start, window_end)
     return count
+
+
+def _window_key(payload: dict[str, Any]) -> tuple[str | None, str | None]:
+    return payload.get("start"), payload.get("end")
+
+
+def _payloads(
+    session: Session,
+    source: Source,
+    window_start: date,
+    window_end: date,
+    force: bool,
+) -> list[dict[str, Any]]:
+    if source.rolling:
+        return [{"force": force}]
+
+    window = source.window(window_start, window_end)
+    if window is None:
+        logger.info(
+            "%s: nothing to request, %s..%s is outside its coverage",
+            source.kind,
+            window_start,
+            window_end,
+        )
+        return []
+    source_start, source_end = window
+    if window != (window_start, window_end):
+        logger.info(
+            "%s: clamped to its coverage, %s..%s", source.kind, source_start, source_end
+        )
+    return [
+        {
+            "start": range_start.isoformat(),
+            "end": range_end.isoformat(),
+            "force": force,
+        }
+        for range_start, range_end in _ranges(
+            session, source, source_start, source_end, force
+        )
+    ]
+
+
+def _ranges(
+    session: Session, source: Source, start: date, end: date, force: bool
+) -> list[tuple[date, date]]:
+    if force or source.when is None:
+        return [(start, end)]
+    stored = stored_days(session, source.when, start, end, source.filters)
+    ranges = missing_ranges(start, end, stored)
+    skipped = (
+        (end - start).days + 1 - sum((last - first).days + 1 for first, last in ranges)
+    )
+    if skipped:
+        logger.info("%s: %d day(s) already stored, skipped", source.kind, skipped)
+    return ranges

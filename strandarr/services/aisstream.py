@@ -2,23 +2,27 @@ import asyncio
 import contextlib
 import logging
 import signal
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import InstrumentedAttribute
 from sqlalchemy.orm import Session as OrmSession
 
+from strandarr import sources
+from strandarr.config import settings
 from strandarr.connectors.aisstream import stream
-from strandarr.models.vessel_position import VesselPosition
+from strandarr.grid import BBOX
+from strandarr.models import VesselPosition
 from strandarr.repositories import store
 from strandarr.repositories.db import Session
-from strandarr.services.schedule import BBOX, SOURCE_AIS_LIVE, SOURCE_FISHING
-from strandarr.utils import log
-from strandarr.utils.config import settings
 
 logger = logging.getLogger(__name__)
 
+Position = dict[str, Any]
+
 WRITE_CHECK_SECONDS = 60
+LOG_EVERY_POSITIONS = 5000
 MAX_BUFFER = 5000
 FLEET_REFRESH_SECONDS = 1800
 
@@ -32,7 +36,7 @@ def _last_known(
 ) -> dict[str, str]:
     stmt = (
         select(VesselPosition.mmsi, column)
-        .where(VesselPosition.source == SOURCE_FISHING, column.isnot(None))
+        .where(VesselPosition.source == sources.GFW_FISHING, column.isnot(None))
         .distinct(VesselPosition.mmsi)
         .order_by(VesselPosition.mmsi, VesselPosition.recorded_at.desc())
     )
@@ -47,7 +51,7 @@ def _fishing_fleet() -> dict[str, dict[str, str]]:
             mmsi: {}
             for mmsi in session.execute(
                 select(VesselPosition.mmsi)
-                .where(VesselPosition.source == SOURCE_FISHING)
+                .where(VesselPosition.source == sources.GFW_FISHING)
                 .distinct()
             ).scalars()
         }
@@ -64,7 +68,7 @@ def _fishing_fleet() -> dict[str, dict[str, str]]:
 
 
 def _rows(
-    positions: dict[tuple[str, datetime], dict], fleet: dict[str, dict[str, str]]
+    positions: dict[tuple[str, datetime], Position], fleet: dict[str, dict[str, str]]
 ) -> list[VesselPosition]:
     rows = []
     for (mmsi, hour), position in positions.items():
@@ -77,7 +81,7 @@ def _rows(
                 recorded_at=hour,
                 lat=position["lat"],
                 lon=position["lon"],
-                source=SOURCE_AIS_LIVE,
+                source=sources.AIS_LIVE,
                 ship_name=position.get("name") or known.get("name"),
                 flag=known.get("flag"),
                 gear_type=known.get("gear_type"),
@@ -89,26 +93,26 @@ def _rows(
 
 
 def _write(
-    positions: dict[tuple[str, datetime], dict], fleet: dict[str, dict[str, str]]
+    positions: dict[tuple[str, datetime], Position], fleet: dict[str, dict[str, str]]
 ) -> int:
     rows = _rows(positions, fleet)
     if not rows:
         return 0
     with Session() as session:
-        store.upsert(session, VesselPosition, rows, update=False)
+        store.upsert(session, VesselPosition, rows, overwrite=False)
         session.commit()
     return len(rows)
 
 
 def _take_closed(
-    positions: dict[tuple[str, datetime], dict], cutoff: datetime | None
-) -> dict[tuple[str, datetime], dict]:
+    positions: dict[tuple[str, datetime], Position], cutoff: datetime | None
+) -> dict[tuple[str, datetime], Position]:
     closed = [key for key in positions if cutoff is None or key[1] < cutoff]
     return {key: positions.pop(key) for key in closed}
 
 
 async def _flush(
-    positions: dict[tuple[str, datetime], dict],
+    positions: dict[tuple[str, datetime], Position],
     fleet: dict[str, dict[str, str]],
     cutoff: datetime | None,
 ) -> int:
@@ -126,7 +130,7 @@ async def _flush(
 
 
 async def _collect(bbox: tuple[float, float, float, float]) -> None:
-    positions: dict[tuple[str, datetime], dict] = {}
+    positions: dict[tuple[str, datetime], Position] = {}
     fleet = await asyncio.to_thread(_fishing_fleet)
     logger.info(
         "aisstream: %d GFW fishing vessels on the roster, writing each hour once",
@@ -148,7 +152,7 @@ async def _collect(bbox: tuple[float, float, float, float]) -> None:
             positions[(record["mmsi"], _hour(record["at"]))] = record
             if len(positions) >= MAX_BUFFER:
                 await _flush(positions, fleet, None)
-            if seen >= 5000:
+            if seen >= LOG_EVERY_POSITIONS:
                 logger.info(
                     "aisstream: %d of %d positions off the roster, %d hours buffered",
                     unknown,
@@ -168,7 +172,7 @@ async def _collect(bbox: tuple[float, float, float, float]) -> None:
                 logger.info(
                     "aisstream: roster refreshed, %d GFW fishing vessels", len(fleet)
                 )
-            await _flush(positions, fleet, _hour(datetime.now(timezone.utc)))
+            await _flush(positions, fleet, _hour(datetime.now(UTC)))
 
     tasks = [asyncio.create_task(consume()), asyncio.create_task(write_closed_hours())]
     stopping = asyncio.create_task(stop.wait())
@@ -189,16 +193,7 @@ async def _collect(bbox: tuple[float, float, float, float]) -> None:
         )
 
 
-def run(bbox: tuple[float, float, float, float]) -> None:
-    asyncio.run(_collect(bbox))
-
-
 def main() -> None:
-    log.setup()
     if not settings.aisstream_api_key:
         raise SystemExit("AISSTREAM_API_KEY is not set")
-    run(BBOX)
-
-
-if __name__ == "__main__":
-    main()
+    asyncio.run(_collect(BBOX))

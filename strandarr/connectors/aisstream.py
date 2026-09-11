@@ -3,7 +3,8 @@ import json
 import logging
 import random
 from collections.abc import AsyncIterator
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from typing import Any
 
 import websockets
 from websockets.asyncio.client import connect
@@ -20,8 +21,9 @@ BACKOFF_SECONDS = 2
 MAX_BACKOFF_SECONDS = 120
 
 
-def subscription(api_key: str, bbox: tuple[float, float, float, float]) -> dict:
-    """aisstream takes corners as [lat, lon] pairs, north-west corner first."""
+def subscription(
+    api_key: str, bbox: tuple[float, float, float, float]
+) -> dict[str, Any]:
     min_lon, min_lat, max_lon, max_lat = bbox
     return {
         "APIKey": api_key,
@@ -30,18 +32,15 @@ def subscription(api_key: str, bbox: tuple[float, float, float, float]) -> dict:
     }
 
 
-def _received_at(meta: dict) -> datetime:
-    """MetaData.time_utc uses Go's default layout, "2026-09-10 12:00:00.000000000 +0000 UTC".
-    Always UTC, so the offset and the trailing zone name carry nothing we need."""
+def _received_at(meta: dict[str, Any]) -> datetime:
     raw = str(meta.get("time_utc", ""))[:19]
     try:
-        return datetime.fromisoformat(raw).replace(tzinfo=timezone.utc)
+        return datetime.fromisoformat(raw).replace(tzinfo=UTC)
     except ValueError:
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)
 
 
-def parse(message: dict) -> dict | None:
-    """One position report, or None if the frame carries no usable position."""
+def parse(message: dict[str, Any]) -> dict[str, Any] | None:
     if message.get("MessageType") != "PositionReport":
         return None
     meta = message.get("MetaData") or {}
@@ -63,13 +62,7 @@ def parse(message: dict) -> dict | None:
 
 async def stream(
     api_key: str, bbox: tuple[float, float, float, float]
-) -> AsyncIterator[dict]:
-    """Position reports from the live feed, reconnecting for as long as the caller iterates.
-
-    The stream is push-only and has no history endpoint: it can never be asked about a past
-    hour, so a dropped connection is a permanent hole in coverage. Hence reconnect forever
-    rather than surfacing the error.
-    """
+) -> AsyncIterator[dict[str, Any]]:
     attempt = 0
     while True:
         try:
@@ -95,9 +88,9 @@ async def stream(
         except asyncio.CancelledError:
             raise
         except (
+            TimeoutError,
             OSError,
             websockets.WebSocketException,
-            asyncio.TimeoutError,
             RuntimeError,
         ) as exc:
             attempt += 1

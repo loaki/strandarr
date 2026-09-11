@@ -4,17 +4,13 @@ from typing import Sequence, Union
 
 from alembic import op
 
-revision: str = '9c2f5a81b7e4'
-down_revision: Union[str, Sequence[str], None] = '8b1c47d29fa3'
+revision: str = "9c2f5a81b7e4"
+down_revision: Union[str, Sequence[str], None] = "8b1c47d29fa3"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    # A vessel-hour is one row now, whichever source reported it, so existing rows that share
-    # one have to be reduced before the tighter index can be built. GFW wins: it carries the
-    # effort hours and gear that a live AIS row cannot, and the live row was only ever a
-    # placeholder for the days GFW had not published yet.
     op.execute("""
         DELETE FROM vessel_position v
         USING (
@@ -29,20 +25,20 @@ def upgrade() -> None:
           AND v.recorded_at = d.recorded_at
           AND v.id <> d.keep
     """)
-    op.drop_index('ix_vessel_position_dedup', table_name='vessel_position')
+    op.drop_index("ix_vessel_position_dedup", table_name="vessel_position")
     op.create_index(
-        'ix_vessel_position_dedup',
-        'vessel_position',
-        ['mmsi', 'recorded_at'],
+        "ix_vessel_position_dedup",
+        "vessel_position",
+        ["mmsi", "recorded_at"],
         unique=True,
     )
 
 
 def downgrade() -> None:
-    op.drop_index('ix_vessel_position_dedup', table_name='vessel_position')
+    op.drop_index("ix_vessel_position_dedup", table_name="vessel_position")
     op.create_index(
-        'ix_vessel_position_dedup',
-        'vessel_position',
-        ['mmsi', 'recorded_at', 'source'],
+        "ix_vessel_position_dedup",
+        "vessel_position",
+        ["mmsi", "recorded_at", "source"],
         unique=True,
     )

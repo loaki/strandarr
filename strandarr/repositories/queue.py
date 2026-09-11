@@ -5,16 +5,17 @@ from typing import Any, cast
 from sqlalchemy import CursorResult, or_, select, update
 from sqlalchemy.orm import Session
 
+from strandarr.models import Job, JobStatus
 from strandarr.models.base import utc_now
-from strandarr.models.job import Job, JobStatus
 
 logger = logging.getLogger(__name__)
 
 MAX_ATTEMPTS = 3
 RETRY_DELAY = timedelta(minutes=1)
+UNFINISHED = (JobStatus.PENDING, JobStatus.RUNNING)
 
 
-def release_running(session: Session) -> int:
+def release_running(session: Session) -> None:
     released = cast(
         "CursorResult[Any]",
         session.execute(
@@ -26,10 +27,24 @@ def release_running(session: Session) -> int:
     session.commit()
     if released:
         logger.warning("released %d job(s) left running by a previous worker", released)
-    return released
 
 
-def enqueue(session: Session, kind: str, payload: dict) -> Job:
+def unfinished_payloads(session: Session, kind: str) -> list[dict[str, Any]]:
+    return list(
+        session.execute(
+            select(Job.payload).where(Job.kind == kind, Job.status.in_(UNFINISHED))
+        ).scalars()
+    )
+
+
+def defer(session: Session, job: Job) -> None:
+    job.status = JobStatus.PENDING
+    job.attempts = max(0, job.attempts - 1)
+    job.started_at = utc_now()
+    session.commit()
+
+
+def enqueue(session: Session, kind: str, payload: dict[str, Any]) -> Job:
     job = Job(kind=kind, payload=payload)
     session.add(job)
     session.flush()
@@ -60,6 +75,7 @@ def claim_next(session: Session) -> Job | None:
 def mark_done(session: Session, job: Job) -> None:
     job.status = JobStatus.DONE
     job.finished_at = utc_now()
+    job.error = None
     session.commit()
 
 

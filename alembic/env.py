@@ -2,7 +2,7 @@ from alembic import context
 from sqlalchemy import create_engine
 
 from strandarr.models import Base
-from strandarr.utils.config import settings
+from strandarr.config import settings
 
 target_metadata = Base.metadata
 

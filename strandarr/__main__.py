@@ -1,10 +1,10 @@
 import argparse
 from datetime import date
 
+from strandarr import log
 from strandarr.repositories.db import Session
+from strandarr.services import aisstream, reference, worker
 from strandarr.services.schedule import DEFAULT_BACKFILL_DAYS, schedule_missing
-from strandarr.services.worker import run_forever
-from strandarr.utils import log
 
 
 def _date(value: str) -> date:
@@ -16,38 +16,58 @@ def _date(value: str) -> date:
         ) from None
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        prog="strandarr",
-        description="ingest: enqueue jobs for missing data. worker: consume jobs.",
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="strandarr")
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    ingest = commands.add_parser(
+        "ingest", help="enqueue jobs for days that are not stored yet"
     )
-    parser.add_argument("command", choices=["ingest", "worker"])
-    parser.add_argument(
+    ingest.add_argument(
         "--start",
         type=_date,
         metavar="YYYY-MM-DD",
-        help=f"first day to ingest, e.g. 2026-08-24 (default: {DEFAULT_BACKFILL_DAYS} days ago)",
+        help=f"first day to ingest (default: {DEFAULT_BACKFILL_DAYS} days ago)",
     )
-    parser.add_argument(
+    ingest.add_argument(
         "--end",
         type=_date,
         metavar="YYYY-MM-DD",
-        help="last day to ingest, e.g. 2026-09-02 (default: today)",
+        help="last day to ingest (default: today)",
     )
-    parser.add_argument(
+    ingest.add_argument(
         "--force",
         action="store_true",
-        help="re-request days already stored and overwrite them (default: skip stored days)",
+        help="re-request days already stored and overwrite them",
     )
-    args = parser.parse_args()
 
+    commands.add_parser("worker", help="consume queued jobs until stopped")
+    commands.add_parser("aisstream", help="record the live AIS feed until stopped")
+    commands.add_parser(
+        "reference",
+        help="rebuild coastline segments and grid cells. Run before the first "
+        "ingest, and again after changing GRID_STEP_DEG or "
+        "MAX_DISTANCE_TO_COAST_KM",
+    )
+    return parser
+
+
+def main() -> None:
+    args = _parser().parse_args()
     log.setup()
 
     if args.command == "ingest":
         with Session() as session:
             schedule_missing(session, start=args.start, end=args.end, force=args.force)
     elif args.command == "worker":
-        run_forever()
+        worker.run_forever()
+    elif args.command == "aisstream":
+        aisstream.main()
+    elif args.command == "reference":
+        with Session() as session:
+            written = reference.build(session)
+        for name, count in written.items():
+            print(f"upserted {count} {name}")
 
 
 if __name__ == "__main__":

@@ -1,17 +1,58 @@
 const EMPTY = { type: "FeatureCollection", features: [] };
 const RAMP_STEPS = 10;
 
-const FIELDS = {
-  wind: { max: 50, stops: ["#2ecc71", "#f1c40f", "#e74c3c"], flip: true },
-  currents: { max: 3, stops: ["#74b9ff", "#6c5ce7", "#e84393"], flip: false },
-};
-
-const LAYERS = [
-  { id: "wind", label: "Wind", color: "#f1c40f" },
-  { id: "currents", label: "Currents", color: "#6c5ce7" },
-  { id: "vessels", label: "Vessels", color: "#2b6cb0" },
-  { id: "strandings", label: "Strandings", color: "#e63946" },
+const CONDITION_LAYERS = [
+  {
+    id: "wind",
+    label: "Wind",
+    color: "#f1c40f",
+    speed: "wind_speed_kmh",
+    direction: "wind_direction_deg",
+    max: 70,
+    from: true,
+    stops: ["#2ecc71", "#f1c40f", "#e74c3c"],
+    fields: ["wind_speed_kmh", "wind_direction_deg"],
+  },
+  {
+    id: "currents",
+    label: "Currents",
+    color: "#6c5ce7",
+    speed: "current_speed_kmh",
+    direction: "current_direction_deg",
+    max: 8,
+    from: false,
+    thick: true,
+    stops: ["#74b9ff", "#6c5ce7", "#e84393"],
+    fields: ["current_speed_kmh", "current_direction_deg"],
+  },
+  {
+    id: "waves",
+    label: "Waves",
+    color: "#22a6b3",
+    speed: "wave_height_m",
+    direction: "wave_direction_deg",
+    max: 8,
+    from: false,
+    stops: ["#dff9fb", "#22a6b3", "#130f40"],
+    fields: [
+      "wave_height_m",
+      "wave_direction_deg",
+      "wave_period_s",
+      "swell_height_m",
+      "swell_direction_deg",
+      "swell_period_s",
+      "sea_surface_temperature_c",
+      "sea_level_m",
+    ],
+  },
 ];
+
+const POINT_LAYERS = [
+  { id: "vessels", label: "Vessels", color: "#2b6cb0", radius: 4 },
+  { id: "strandings", label: "Strandings", color: "#e63946", radius: 7 },
+];
+
+const LAYERS = [...CONDITION_LAYERS, ...POINT_LAYERS];
 
 const FIELD_LABELS = {
   mmsi: "MMSI",
@@ -20,25 +61,57 @@ const FIELD_LABELS = {
   gear_type: "Gear",
   vessel_type: "Type",
   effort_hours: "Fishing hours",
-  speed: "Speed",
   species_scientific: "Species",
   species_common: "Common name",
   individual_count: "Animals",
   recorded_at: "Recorded at",
+  time_uncertainty_hours: "Time uncertainty",
+  coordinate_uncertainty_m: "Position uncertainty",
+  location_precision: "Position from",
   source: "Source",
+  sources: "Sources",
   external_id: "Source id",
   lat: "Latitude",
   lon: "Longitude",
+  wind_speed_kmh: "Wind speed",
+  wind_direction_deg: "Wind direction",
+  current_speed_kmh: "Current speed",
+  current_direction_deg: "Current direction",
+  wave_height_m: "Wave height",
+  wave_direction_deg: "Wave direction",
+  wave_period_s: "Wave period",
+  swell_height_m: "Swell height",
+  swell_direction_deg: "Swell direction",
+  swell_period_s: "Swell period",
+  sea_surface_temperature_c: "Sea temperature",
+  sea_level_m: "Tide height",
 };
 
-const UNITS = { speed: " km/h", effort_hours: " h" };
+const UNITS = {
+  wind_speed_kmh: " km/h",
+  current_speed_kmh: " km/h",
+  wave_height_m: " m",
+  swell_height_m: " m",
+  wave_period_s: " s",
+  swell_period_s: " s",
+  effort_hours: " h",
+  time_uncertainty_hours: " h",
+  coordinate_uncertainty_m: " m",
+  sea_surface_temperature_c: " °C",
+  sea_level_m: " m",
+};
 
-let gridStep = 1.0;
+const DIRECTION_SENSE = {
+  wind_direction_deg: "from",
+  current_direction_deg: "toward",
+  wave_direction_deg: "toward",
+  swell_direction_deg: "toward",
+};
 
 function lerpColor(a, b, t) {
-  const pa = [1, 3, 5].map((i) => parseInt(a.slice(i, i + 2), 16));
-  const pb = [1, 3, 5].map((i) => parseInt(b.slice(i, i + 2), 16));
-  const mix = pa.map((v, i) => Math.round(v + (pb[i] - v) * t));
+  const from = [1, 3, 5].map((i) => parseInt(a.slice(i, i + 2), 16));
+  const to = [1, 3, 5].map((i) => parseInt(b.slice(i, i + 2), 16));
+  const mix = from.map((v, i) => Math.round(v + (to[i] - v) * t));
   return `rgb(${mix.join(",")})`;
 }
 
@@ -77,62 +150,84 @@ function arrowImage(color, thick) {
 }
 
 function registerArrows(map) {
-  for (const [id, field] of Object.entries(FIELDS)) {
+  for (const layer of CONDITION_LAYERS) {
     for (let i = 0; i < RAMP_STEPS; i++) {
-      const color = rampColor(field.stops, i / (RAMP_STEPS - 1));
-      map.addImage(`${id}-${i}`, arrowImage(color, id === "currents"));
+      const color = rampColor(layer.stops, i / (RAMP_STEPS - 1));
+      map.addImage(`${layer.id}-${i}`, arrowImage(color, layer.thick));
     }
   }
 }
 
-function iconImageExpression(id, field) {
-  const expr = ["step", ["get", "speed"], `${id}-0`];
+function iconImageExpression(layer) {
+  const expression = ["step", ["get", layer.speed], `${layer.id}-0`];
   for (let i = 1; i < RAMP_STEPS; i++) {
-    expr.push((field.max * i) / RAMP_STEPS, `${id}-${i}`);
+    expression.push((layer.max * i) / RAMP_STEPS, `${layer.id}-${i}`);
   }
-  return expr;
+  return expression;
 }
 
-function toFeatureCollection(rows, offset = 0) {
+function toFeatureCollection(rows) {
   return {
     type: "FeatureCollection",
     features: rows.map((row) => ({
       type: "Feature",
-      geometry: { type: "Point", coordinates: [row.lon + offset, row.lat + offset] },
+      geometry: { type: "Point", coordinates: [row.lon, row.lat] },
       properties: row,
     })),
   };
 }
 
-function floorHour(iso) {
-  const d = new Date(iso);
-  d.setUTCMinutes(0, 0, 0);
-  return d;
+function conditionRows(rows, layer) {
+  return rows
+    .filter((row) => row[layer.speed] !== null && row[layer.direction] !== null)
+    .map((row) => {
+      const picked = { lat: row.lat, lon: row.lon, sources: row.sources };
+      for (const field of layer.fields) picked[field] = row[field];
+      return picked;
+    });
 }
 
-const fmtHour = (d) => d.toISOString();
-const fmtDay = (d) => d.toISOString().slice(0, 10);
-const fmtLabel = (d) => d.toUTCString().slice(0, 22) + " UTC";
+function floorHour(iso) {
+  const at = new Date(iso);
+  at.setUTCMinutes(0, 0, 0);
+  return at;
+}
+
+const fmtHour = (at) => at.toISOString();
+const fmtDay = (at) => at.toISOString().slice(0, 10);
+const fmtLabel = (at) => at.toUTCString().slice(0, 22) + " UTC";
 
 function fmtValue(key, value) {
   if (value === null || value === undefined || value === "") return "—";
-  if (typeof value === "number") return Math.round(value * 100) / 100 + (UNITS[key] || "");
+  if (Array.isArray(value)) return value.join(", ");
+  if (key in DIRECTION_SENSE) {
+    return `${DIRECTION_SENSE[key]} ${Math.round(value)}°`;
+  }
+  if (typeof value === "number") {
+    return Math.round(value * 100) / 100 + (UNITS[key] || "");
+  }
   return String(value);
 }
 
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
 function popupHtml(layerId, props) {
-  const title = LAYERS.find((l) => l.id === layerId).label;
-  const entries = Object.entries(props).filter(
-    ([k, v]) => v !== null && v !== undefined && v !== "" && k !== "direction"
-  );
-  let rows = entries
-    .map(([k, v]) => `<tr><th>${FIELD_LABELS[k] || k}</th><td>${fmtValue(k, v)}</td></tr>`)
+  const title = LAYERS.find((layer) => layer.id === layerId).label;
+  const rows = Object.entries(props)
+    .filter(([, value]) => value !== null && value !== undefined && value !== "")
+    .map(
+      ([key, value]) =>
+        `<tr><th>${escapeHtml(FIELD_LABELS[key] || key)}</th>` +
+        `<td>${escapeHtml(fmtValue(key, value))}</td></tr>`
+    )
     .join("");
-  if (props.direction !== undefined && props.direction !== null) {
-    const deg = Math.round(props.direction);
-    const wording = layerId === "wind" ? `from ${deg}°` : `toward ${deg}°`;
-    rows = `<tr><th>Direction</th><td>${wording}</td></tr>` + rows;
-  }
   return `<div class="popup"><h4>${title}</h4><table>${rows}</table></div>`;
 }
 
@@ -150,70 +245,72 @@ const jump = document.getElementById("jump");
 
 let selectedTick = null;
 let hours = [];
+let pendingHour = 0;
 const hidden = new Set();
 
 function bindPopup(id) {
-  map.on("click", id, (e) => {
+  map.on("click", id, (event) => {
     new maplibregl.Popup({ maxWidth: "320px" })
-      .setLngLat(e.lngLat)
-      .setHTML(popupHtml(id, e.features[0].properties))
+      .setLngLat(event.lngLat)
+      .setHTML(popupHtml(id, event.features[0].properties))
       .addTo(map);
   });
   map.on("mouseenter", id, () => (map.getCanvas().style.cursor = "pointer"));
   map.on("mouseleave", id, () => (map.getCanvas().style.cursor = ""));
 }
 
-function addFieldLayer(id) {
-  const field = FIELDS[id];
-  map.addSource(id, { type: "geojson", data: EMPTY });
+function addArrowLayer(layer) {
+  map.addSource(layer.id, { type: "geojson", data: EMPTY });
   map.addLayer({
-    id,
+    id: layer.id,
     type: "symbol",
-    source: id,
+    source: layer.id,
     layout: {
-      "icon-image": iconImageExpression(id, field),
-      "icon-rotate": field.flip ? ["+", ["get", "direction"], 180] : ["get", "direction"],
+      "icon-image": iconImageExpression(layer),
+      "icon-rotate": layer.from
+        ? ["+", ["get", layer.direction], 180]
+        : ["get", layer.direction],
       "icon-rotation-alignment": "map",
       "icon-allow-overlap": true,
       "icon-ignore-placement": true,
       "icon-size": [
         "interpolate",
         ["linear"],
-        ["get", "speed"],
+        ["get", layer.speed],
         0,
         0.45,
-        field.max,
+        layer.max,
         1.0,
       ],
     },
   });
-  bindPopup(id);
+  bindPopup(layer.id);
 }
 
-function addCircleLayer(id, color, radius) {
-  map.addSource(id, { type: "geojson", data: EMPTY });
+function addCircleLayer(layer) {
+  map.addSource(layer.id, { type: "geojson", data: EMPTY });
   map.addLayer({
-    id,
+    id: layer.id,
     type: "circle",
-    source: id,
+    source: layer.id,
     paint: {
-      "circle-radius": radius,
-      "circle-color": color,
+      "circle-radius": layer.radius,
+      "circle-color": layer.color,
       "circle-stroke-width": 1,
       "circle-stroke-color": "#fff",
       "circle-opacity": 0.85,
     },
   });
-  bindPopup(id);
+  bindPopup(layer.id);
 }
 
 function renderLegend(counts) {
   legend.innerHTML = LAYERS.map(
-    (l) =>
-      `<label class="legend-row"><input type="checkbox" data-layer="${l.id}"` +
-      `${hidden.has(l.id) ? "" : " checked"}>` +
-      `<span class="dot" style="background:${l.color}"></span>${l.label}` +
-      `<span class="count">${counts[l.id] ?? "–"}</span></label>`
+    (layer) =>
+      `<label class="legend-row"><input type="checkbox" data-layer="${layer.id}"` +
+      `${hidden.has(layer.id) ? "" : " checked"}>` +
+      `<span class="dot" style="background:${layer.color}"></span>${layer.label}` +
+      `<span class="count">${counts[layer.id] ?? "–"}</span></label>`
   ).join("");
   legend.querySelectorAll("input[data-layer]").forEach((input) => {
     input.addEventListener("change", () => {
@@ -227,14 +324,11 @@ function renderLegend(counts) {
 
 map.on("load", async () => {
   registerArrows(map);
-  addFieldLayer("wind");
-  addFieldLayer("currents");
-  addCircleLayer("vessels", "#2b6cb0", 4);
-  addCircleLayer("strandings", "#e63946", 7);
+  CONDITION_LAYERS.forEach(addArrowLayer);
+  POINT_LAYERS.forEach(addCircleLayer);
   renderLegend({});
 
-  const range = await fetch("/api/range").then((r) => r.json());
-  if (range.grid_step) gridStep = range.grid_step;
+  const range = await fetch("/api/range").then((response) => response.json());
   if (!range.min || !range.max) {
     label.textContent = "No data ingested yet";
     return;
@@ -244,8 +338,8 @@ map.on("load", async () => {
 
 function buildTimeline(start, end) {
   hours = [];
-  for (let d = new Date(start); d <= end; d.setUTCHours(d.getUTCHours() + 1)) {
-    hours.push(new Date(d));
+  for (let at = new Date(start); at <= end; at.setUTCHours(at.getUTCHours() + 1)) {
+    hours.push(new Date(at));
   }
 
   let hoursEl = null;
@@ -276,7 +370,7 @@ function buildTimeline(start, end) {
   jump.min = fmtDay(hours[0]);
   jump.max = fmtDay(hours[hours.length - 1]);
   jump.addEventListener("change", () => {
-    const target = hours.find((h) => fmtDay(h) === jump.value);
+    const target = hours.find((hour) => fmtDay(hour) === jump.value);
     if (target) {
       const tick = track.querySelector(`[data-hour="${fmtHour(target)}"]`);
       selectHour(target, tick);
@@ -297,23 +391,22 @@ async function selectHour(hour, tick) {
   label.textContent = fmtLabel(hour);
   jump.value = fmtDay(hour);
 
-  const hourParam = encodeURIComponent(fmtHour(hour));
-  const day = fmtDay(hour);
-  const [vessels, wind, currents, strandings] = await Promise.all([
-    fetch(`/api/vessels?hour=${hourParam}`).then((r) => r.json()),
-    fetch(`/api/wind?hour=${hourParam}`).then((r) => r.json()),
-    fetch(`/api/currents?hour=${hourParam}`).then((r) => r.json()),
-    fetch(`/api/strandings?day=${day}`).then((r) => r.json()),
+  const at = encodeURIComponent(fmtHour(hour));
+  const request = ++pendingHour;
+  const [conditions, vessels, strandings] = await Promise.all([
+    fetch(`/api/conditions?at=${at}`).then((response) => response.json()),
+    fetch(`/api/vessels?at=${at}`).then((response) => response.json()),
+    fetch(`/api/strandings?day=${fmtDay(hour)}`).then((response) => response.json()),
   ]);
+  if (request !== pendingHour) return;
 
+  const counts = { vessels: vessels.length, strandings: strandings.length };
+  for (const layer of CONDITION_LAYERS) {
+    const rows = conditionRows(conditions, layer);
+    map.getSource(layer.id).setData(toFeatureCollection(rows));
+    counts[layer.id] = rows.length;
+  }
   map.getSource("vessels").setData(toFeatureCollection(vessels));
-  map.getSource("wind").setData(toFeatureCollection(wind));
-  map.getSource("currents").setData(toFeatureCollection(currents, gridStep / 2));
   map.getSource("strandings").setData(toFeatureCollection(strandings));
-  renderLegend({
-    vessels: vessels.length,
-    wind: wind.length,
-    currents: currents.length,
-    strandings: strandings.length,
-  });
+  renderLegend(counts);
 }

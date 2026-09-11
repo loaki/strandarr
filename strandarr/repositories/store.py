@@ -9,27 +9,20 @@ from strandarr.models.base import Base
 
 MAX_QUERY_PARAMS = 60000
 
-
-def _table(model: type[Base]) -> Table:
-    return cast(Table, model.__table__)
-
-
-def _conflict_columns(model: type[Base]) -> list[str]:
-    for index in _table(model).indexes:
-        if index.unique:
-            return [column.name for column in index.columns]
-    raise ValueError(f"{model.__name__} has no unique index to upsert on")
+SKIP_COLUMNS = frozenset({"id", "created_at"})
 
 
 def upsert(
-    session: Session, model: type[Base], rows: Sequence[Base], update: bool = False
-) -> None:
+    session: Session,
+    model: type[Base],
+    rows: Sequence[Base],
+    overwrite: bool = False,
+) -> int:
     if not rows:
-        return
-    columns = [
-        c.name for c in model.__table__.columns if c.name not in ("id", "created_at")
-    ]
-    conflict = _conflict_columns(model)
+        return 0
+    table = cast(Table, model.__table__)
+    columns = [c.name for c in table.columns if c.name not in SKIP_COLUMNS]
+    conflict = conflict_columns(model)
 
     deduped = {
         tuple(getattr(row, name) for name in conflict): {
@@ -39,18 +32,32 @@ def upsert(
     }
     values = list(deduped.values())
 
-    batch_size = max(1, MAX_QUERY_PARAMS // len(_table(model).columns))
+    batch_size = max(1, MAX_QUERY_PARAMS // len(columns))
     for start in range(0, len(values), batch_size):
-        stmt = insert(model).values(values[start : start + batch_size])
-        if update:
-            stmt = stmt.on_conflict_do_update(
+        statement = insert(model).values(values[start : start + batch_size])
+        if overwrite:
+            statement = statement.on_conflict_do_update(
                 index_elements=conflict,
                 set_={
-                    name: stmt.excluded[name]
+                    name: statement.excluded[name]
                     for name in columns
                     if name not in conflict
                 },
             )
         else:
-            stmt = stmt.on_conflict_do_nothing(index_elements=conflict)
-        session.execute(stmt)
+            statement = statement.on_conflict_do_nothing(index_elements=conflict)
+        session.execute(statement)
+    return len(values)
+
+
+def conflict_columns(model: type[Base]) -> list[str]:
+    table = cast(Table, model.__table__)
+    unique = sorted(
+        (index for index in table.indexes if index.unique), key=lambda i: i.name or ""
+    )
+    if len(unique) != 1:
+        raise ValueError(
+            f"{model.__name__} needs exactly one unique index to upsert on, "
+            f"found {len(unique)}"
+        )
+    return [column.name for column in unique[0].columns]

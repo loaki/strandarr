@@ -1,17 +1,20 @@
 import hashlib
 import logging
 import re
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime, timedelta
+from typing import Any
 
 import httpx
 
-from strandarr.utils import species
+from strandarr import sources, species
 from strandarr.connectors.http import request_text
-from strandarr.models.stranding import Stranding
+from strandarr.models import Stranding
 
 logger = logging.getLogger(__name__)
 
 BASE_URL = "http://pelagis.in2p3.fr/public/histo-carto/echouage_multilayers.php"
+SOURCE = sources.PELAGIS_HISTOCARTO
+TIMEOUT_SECONDS = 180
 
 ALL_FACADES = (
     "29_56_44_85_17_33_40_64_99A_2A_2B_06_83_13_30_34_11_66_99M_27_59_62_80_76_14_50_35_22_99B_99N_"
@@ -22,52 +25,43 @@ EVENT_LINE = re.compile(
     r"^\s*(\d{4}-\d{2}-\d{2})\s*/\s*(\d+)\s*/\s*([^/]+?)\s*/\s*(.+?)\s*$"
 )
 
+COMMUNE_UNCERTAINTY_M = 5000.0
+
+DAY_UNCERTAINTY_HOURS = 12.0
+
 
 def fetch_strandings(
     bbox: tuple[float, float, float, float], start: date, end: date
 ) -> list[Stranding]:
-    params = {
-        "date_inf": start.isoformat(),
-        "date_sup": end.isoformat(),
-        "nb_mam_inf": 1,
-        "nb_mam_sup": 100000,
-        "ordre1": "",
-        "famille1": "",
-        "lb_nom1": "",
-        "ordre2": "",
-        "famille2": "",
-        "lb_nom2": "",
-        "facade1": ALL_FACADES,
-        "nom_facade1": "Toutes",
-    }
-    with httpx.Client(timeout=180) as client:
-        raw = request_text(client, "GET", BASE_URL, params=params)
-
-    strandings = _parse(raw, bbox)
-    logger.info(
-        "pelagis_histocarto: %s..%s -> %d strandings", start, end, len(strandings)
-    )
+    with httpx.Client(timeout=TIMEOUT_SECONDS) as client:
+        raw = request_text(
+            client,
+            "GET",
+            BASE_URL,
+            params={
+                "date_inf": start.isoformat(),
+                "date_sup": end.isoformat(),
+                "nb_mam_inf": 1,
+                "nb_mam_sup": 100000,
+                "ordre1": "",
+                "famille1": "",
+                "lb_nom1": "",
+                "ordre2": "",
+                "famille2": "",
+                "lb_nom2": "",
+                "facade1": ALL_FACADES,
+                "nom_facade1": "Toutes",
+            },
+        )
+    strandings = parse(raw, bbox)
+    logger.info("%s: %s..%s -> %d strandings", SOURCE, start, end, len(strandings))
     return strandings
 
 
-def _identity(
-    lat: float, lon: float, day: str, common: str, commune: str, index: int
-) -> str:
-    """Stable id for an event that carries no id of its own.
-
-    Hashed from what identifies the event and nothing that can be revised, so a corrected
-    individual count updates the row instead of inserting a second one. `index` distinguishes
-    repeats within one map cell, whose event list belongs to the cell rather than to our
-    query, so the numbering does not shift when the requested window changes.
-    """
-    payload = f"{lat:.5f}|{lon:.5f}|{day}|{common}|{commune}|{index}"
-    return hashlib.sha256(payload.encode()).hexdigest()[:32]
-
-
-def _parse(raw: str, bbox: tuple[float, float, float, float]) -> list[Stranding]:
+def parse(raw: str, bbox: tuple[float, float, float, float]) -> list[Stranding]:
     min_lon, min_lat, max_lon, max_lat = bbox
-    seen: dict[tuple, int] = {}
-    out = []
+    seen: dict[tuple[Any, ...], int] = {}
+    strandings = []
     for row in raw.split("\n")[1:]:
         fields = row.split("\t")
         if len(fields) < 4:
@@ -82,24 +76,33 @@ def _parse(raw: str, bbox: tuple[float, float, float, float]) -> list[Stranding]
             match = EVENT_LINE.match(line)
             if not match:
                 continue
-            day, count, species_raw, place = match.groups()
-            scientific, common = species.from_common(species_raw)
+            day, count, species_label, place = match.groups()
+            scientific, common = species.from_common(species_label)
             commune = place.partition(",")[0].strip()
             key = (lat, lon, day, common, commune)
             index = seen.get(key, 0)
             seen[key] = index + 1
-            out.append(
+            strandings.append(
                 Stranding(
                     external_id=_identity(lat, lon, day, common, commune, index),
-                    source="pelagis_histocarto",
-                    recorded_at=datetime.fromisoformat(day).replace(
-                        tzinfo=timezone.utc
-                    ),
+                    source=SOURCE,
+                    recorded_at=datetime.fromisoformat(day).replace(tzinfo=UTC)
+                    + timedelta(hours=DAY_UNCERTAINTY_HOURS),
                     lat=lat,
                     lon=lon,
                     species_scientific=scientific,
                     species_common=common,
                     individual_count=int(count),
+                    coordinate_uncertainty_m=COMMUNE_UNCERTAINTY_M,
+                    time_uncertainty_hours=DAY_UNCERTAINTY_HOURS,
+                    location_precision="commune_centroid",
                 )
             )
-    return out
+    return strandings
+
+
+def _identity(
+    lat: float, lon: float, day: str, common: str, commune: str, index: int
+) -> str:
+    payload = f"{lat:.5f}|{lon:.5f}|{day}|{common}|{commune}|{index}"
+    return hashlib.sha256(payload.encode()).hexdigest()[:32]

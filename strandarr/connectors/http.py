@@ -2,6 +2,7 @@ import logging
 import random
 import re
 import time
+from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
@@ -13,12 +14,6 @@ MAX_ATTEMPTS = 8
 BACKOFF_SECONDS = 3
 MAX_BACKOFF_SECONDS = 180
 
-# What each host lets us spend per minute, in its own units. Open-Meteo's minutely ceiling of
-# 600 counts *locations*, not requests -- measured: three 200-location requests in a row draw
-# "Minutely API request limit exceeded" on the fourth, at exactly 600 locations. So a caller
-# passes the number of locations as `cost` and the interval is derived, which keeps a wide
-# request legal instead of leaving the retry loop to absorb a 429 it could have avoided.
-# GFW has no published figure; 30/min reproduces the 2s spacing that stopped its 429s.
 UNITS_PER_MINUTE = {
     "archive-api.open-meteo.com": 600,
     "marine-api.open-meteo.com": 600,
@@ -42,19 +37,13 @@ def _throttle(url: str, cost: int) -> None:
 
 
 class QuotaExhausted(RuntimeError):
-    """The upstream quota is spent for the day or month, so retrying now cannot help."""
+    pass
 
 
-# Minutely and hourly limits recover inside a retry window; daily and monthly ones do not.
-# Retrying those burns all MAX_ATTEMPTS over ~20 minutes and fails the job anyway, so they
-# are surfaced immediately with the quota named. Confirmed live: the archive host answers
-# {"error":true,"reason":"Daily API request limit exceeded. Please try again tomorrow."}
-# while the marine host, which has its own separate quota, still serves normally.
 _SPENT_QUOTA = re.compile(r"\b(daily|monthly)\b", re.IGNORECASE)
 
 
 def _retry_after(response: httpx.Response) -> float | None:
-    """Seconds the server asked us to wait, when it says so as a plain count."""
     value = response.headers.get("retry-after", "").strip()
     if not value.isdigit():
         return None
@@ -62,7 +51,6 @@ def _retry_after(response: httpx.Response) -> float | None:
 
 
 def _reason(response: httpx.Response) -> str:
-    """Open-Meteo names the quota it refused on ("Minutely API request limit exceeded")."""
     try:
         body = response.json()
     except ValueError:
@@ -71,12 +59,12 @@ def _reason(response: httpx.Response) -> str:
 
 
 def _backoff(attempt: int) -> float:
-    delay = min(BACKOFF_SECONDS * 2 ** (attempt - 1), MAX_BACKOFF_SECONDS)
+    delay: float = min(BACKOFF_SECONDS * 2 ** (attempt - 1), MAX_BACKOFF_SECONDS)
     return delay * (0.5 + random.random() / 2)
 
 
 def request(
-    client: httpx.Client, method: str, url: str, cost: int = 1, **kwargs
+    client: httpx.Client, method: str, url: str, cost: int = 1, **kwargs: Any
 ) -> httpx.Response:
     for attempt in range(1, MAX_ATTEMPTS + 1):
         last = attempt == MAX_ATTEMPTS
@@ -119,10 +107,13 @@ def request(
 
 
 def request_json(
-    client: httpx.Client, method: str, url: str, cost: int = 1, **kwargs
-) -> dict | list:
-    return request(client, method, url, cost, **kwargs).json()
+    client: httpx.Client, method: str, url: str, cost: int = 1, **kwargs: Any
+) -> dict[str, Any] | list[Any]:
+    payload: dict[str, Any] | list[Any] = request(
+        client, method, url, cost, **kwargs
+    ).json()
+    return payload
 
 
-def request_text(client: httpx.Client, method: str, url: str, **kwargs) -> str:
+def request_text(client: httpx.Client, method: str, url: str, **kwargs: Any) -> str:
     return request(client, method, url, **kwargs).text
