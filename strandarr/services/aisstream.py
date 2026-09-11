@@ -1,10 +1,3 @@
-"""Live AIS collector: its own long-running process, `python -m strandarr.aisstream`.
-
-Separate from the worker because the feed is push-only. There is no endpoint to ask for a
-past hour, so the only way to have an hour's positions is to have been listening during it --
-which a queue job cannot do without holding the single-threaded worker for the whole window.
-"""
-
 import asyncio
 import contextlib
 import logging
@@ -15,12 +8,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import InstrumentedAttribute
 from sqlalchemy.orm import Session as OrmSession
 
-from strandarr import log, store
-from strandarr.config import settings
 from strandarr.connectors.aisstream import stream
-from strandarr.db import Session
 from strandarr.models.vessel_position import VesselPosition
-from strandarr.schedule import BBOX, SOURCE_AIS_LIVE, SOURCE_FISHING
+from strandarr.repositories import store
+from strandarr.repositories.db import Session
+from strandarr.services.schedule import BBOX, SOURCE_AIS_LIVE, SOURCE_FISHING
+from strandarr.utils import log
+from strandarr.utils.config import settings
 
 logger = logging.getLogger(__name__)
 

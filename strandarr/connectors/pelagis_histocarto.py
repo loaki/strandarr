@@ -5,7 +5,7 @@ from datetime import date, datetime, timezone
 
 import httpx
 
-from strandarr import species
+from strandarr.utils import species
 from strandarr.connectors.http import request_text
 from strandarr.models.stranding import Stranding
 

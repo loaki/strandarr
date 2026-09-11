@@ -79,12 +79,10 @@ _SPACES = re.compile(r" +")
 
 
 def normalize_common(label: str) -> str:
-    """Pelagis HTML labels carry non-breaking and doubled spaces."""
     return _SPACES.sub(" ", label.replace("\xa0", " ")).strip()
 
 
 def from_common(label: str) -> tuple[str | None, str]:
-    """A comma-separated label lists several candidate species; never guess between them."""
     common = normalize_common(label)
     if "," in common:
         return None, common

@@ -5,7 +5,7 @@ from typing import Any
 
 import httpx
 
-from strandarr.config import settings
+from strandarr.utils.config import settings
 from strandarr.connectors.http import request_json
 from strandarr.models.vessel_position import VesselPosition
 

@@ -64,8 +64,6 @@ def mark_done(session: Session, job: Job) -> None:
 
 
 def retry_or_fail(session: Session, job: Job, error: str) -> bool:
-    """Queue the job for another attempt, or fail it for good once its turns are spent.
-    Returns whether it will run again."""
     job.error = error[:2000]
     retry = job.attempts < MAX_ATTEMPTS
     if retry:

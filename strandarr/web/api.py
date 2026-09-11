@@ -6,7 +6,6 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session as SessionType
 
-from strandarr.db import Session
 from strandarr.models import (
     CurrentObservation,
     Stranding,
@@ -14,11 +13,12 @@ from strandarr.models import (
     WindObservation,
 )
 from strandarr.models.base import Observation
-from strandarr.schedule import GRID_STEP_DEG
+from strandarr.repositories.db import Session
+from strandarr.services.schedule import GRID_STEP_DEG
 
 app = FastAPI(title="strandarr")
 
-STATIC_DIR = Path(__file__).resolve().parent / "static"
+STATIC_DIR = Path(__file__).resolve().parents[1] / "static"
 
 
 def _bounds(

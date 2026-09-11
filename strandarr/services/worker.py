@@ -7,16 +7,17 @@ from sqlalchemy import select
 from sqlalchemy.exc import InterfaceError, OperationalError
 from sqlalchemy.orm import Session
 
-from strandarr import log, queue, store
 from strandarr.connectors import gbif, gfw, open_meteo, pelagis_histocarto
-from strandarr.db import Session as SessionFactory
 from strandarr.models.base import Base
 from strandarr.models.current_observation import CurrentObservation
 from strandarr.models.job import Job
 from strandarr.models.stranding import Stranding
 from strandarr.models.vessel_position import VesselPosition
 from strandarr.models.wind_observation import WindObservation
-from strandarr.schedule import BBOX, SOURCE_FISHING, grid_points, stored_days
+from strandarr.repositories import queue, store
+from strandarr.repositories.db import Session as SessionFactory
+from strandarr.services.schedule import BBOX, SOURCE_FISHING, grid_points, stored_days
+from strandarr.utils import log
 
 logger = logging.getLogger(__name__)
 
@@ -60,13 +61,6 @@ def _ingest_chunks(session: Session, payload: dict, model: type[Base], chunks) -
 
 
 def _sea_points(session: Session) -> list[tuple[float, float]]:
-    """The cells the marine model actually answers for.
-
-    It returns nulls on land, so the current rows already stored are the sea mask: 942 of this
-    grid's 2457 cells, measured. The other 1515 were being requested on every run and coming
-    back empty -- 61% of the quota spent on land. Intersected with the live grid so a mask
-    left over from a coarser GRID_STEP_DEG cannot pin either source to it.
-    """
     stored = set(
         session.execute(
             select(CurrentObservation.lat, CurrentObservation.lon).distinct()
@@ -77,8 +71,6 @@ def _sea_points(session: Session) -> list[tuple[float, float]]:
 
 
 def _requested_points(session: Session, payload: dict) -> list[tuple[float, float]]:
-    """`force` sweeps the whole grid again, which is how a cell that has become sea -- a model
-    coverage change, a finer grid -- gets back into the mask. Otherwise mask only."""
     if payload.get("force", False):
         return grid_points()
     return _sea_points(session)

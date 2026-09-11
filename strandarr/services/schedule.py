@@ -5,11 +5,11 @@ from datetime import date, timedelta
 from sqlalchemy import Date, cast, func, select
 from sqlalchemy.orm import Session
 
-from strandarr import queue
 from strandarr.models.base import Observation, SourcedObservation
 from strandarr.models.current_observation import CurrentObservation
 from strandarr.models.vessel_position import VesselPosition
 from strandarr.models.wind_observation import WindObservation
+from strandarr.repositories import queue
 
 logger = logging.getLogger(__name__)
 
@@ -24,17 +24,6 @@ SOURCE_AIS_LIVE = "ais_live"
 
 @dataclass(frozen=True)
 class SourceSpec:
-    """One ingest source and the window it can actually answer for.
-
-    Every source is clamped to its own coverage rather than to a project-wide floor, so a
-    request outside it is trimmed instead of silently returning nothing -- and asking for
-    strandings back to 1934 does not get pulled forward to where the forcing data starts.
-
-    model/source drive per-day gap detection: with a model set, days already stored are not
-    re-requested. Strandings leave it None because a day with no stranding is normal and
-    indistinguishable from a day never fetched, and because upstream revises records.
-    """
-
     kind: str
     first_day: date
     model: type[Observation] | None = None

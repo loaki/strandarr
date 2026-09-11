@@ -11,8 +11,6 @@ MAX_QUERY_PARAMS = 60000
 
 
 def _table(model: type[Base]) -> Table:
-    """DeclarativeBase types __table__ as the general FromClause; every mapped class here
-    is backed by a real Table, which is what carries .indexes and .columns."""
     return cast(Table, model.__table__)
 
 
