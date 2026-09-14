@@ -52,7 +52,14 @@ const POINT_LAYERS = [
   { id: "strandings", label: "Strandings", color: "#e63946", radius: 7 },
 ];
 
-const LAYERS = [...CONDITION_LAYERS, ...POINT_LAYERS];
+const RISK_LAYER = {
+  id: "risk",
+  label: "Stranding risk",
+  color: "#8e44ad",
+  stops: ["#f7e8c8", "#e8a33d", "#c0392b", "#6b1d6b"],
+};
+
+const LAYERS = [RISK_LAYER, ...CONDITION_LAYERS, ...POINT_LAYERS];
 
 const FIELD_LABELS = {
   mmsi: "MMSI",
@@ -85,6 +92,11 @@ const FIELD_LABELS = {
   swell_period_s: "Swell period",
   sea_surface_temperature_c: "Sea temperature",
   sea_level_m: "Tide height",
+  expected_count: "Expected strandings",
+  probability: "Chance of a stranding",
+  release_days: "Contributing release days",
+  length_km: "Segment length",
+  segment_id: "Segment",
 };
 
 const UNITS = {
@@ -99,6 +111,7 @@ const UNITS = {
   coordinate_uncertainty_m: " m",
   sea_surface_temperature_c: " °C",
   sea_level_m: " m",
+  length_km: " km",
 };
 
 const DIRECTION_SENSE = {
@@ -197,9 +210,13 @@ const fmtHour = (at) => at.toISOString();
 const fmtDay = (at) => at.toISOString().slice(0, 10);
 const fmtLabel = (at) => at.toUTCString().slice(0, 22) + " UTC";
 
+const PERCENT = new Set(["probability"]);
+
 function fmtValue(key, value) {
   if (value === null || value === undefined || value === "") return "—";
   if (Array.isArray(value)) return value.join(", ");
+  if (PERCENT.has(key)) return (value * 100).toFixed(1) + " %";
+  if (key === "expected_count") return Number(value).toPrecision(3);
   if (key in DIRECTION_SENSE) {
     return `${DIRECTION_SENSE[key]} ${Math.round(value)}°`;
   }
@@ -287,6 +304,40 @@ function addArrowLayer(layer) {
   bindPopup(layer.id);
 }
 
+function riskColorExpression(peak) {
+  const top = peak > 0 ? peak : 1;
+  const expression = ["interpolate", ["linear"], ["get", "expected_count"]];
+  for (let i = 0; i < RISK_LAYER.stops.length; i++) {
+    const at = (top * i) / (RISK_LAYER.stops.length - 1);
+    expression.push(at, RISK_LAYER.stops[i]);
+  }
+  return expression;
+}
+
+function addRiskLayer() {
+  map.addSource(RISK_LAYER.id, { type: "geojson", data: EMPTY });
+  map.addLayer({
+    id: RISK_LAYER.id,
+    type: "line",
+    source: RISK_LAYER.id,
+    layout: { "line-cap": "round", "line-join": "round" },
+    paint: {
+      "line-color": riskColorExpression(1),
+      "line-width": [
+        "interpolate",
+        ["linear"],
+        ["zoom"],
+        5,
+        ["interpolate", ["linear"], ["get", "probability"], 0, 2.5, 1, 9],
+        10,
+        ["interpolate", ["linear"], ["get", "probability"], 0, 5, 1, 22],
+      ],
+      "line-opacity": 0.9,
+    },
+  });
+  bindPopup(RISK_LAYER.id);
+}
+
 function addCircleLayer(layer) {
   map.addSource(layer.id, { type: "geojson", data: EMPTY });
   map.addLayer({
@@ -324,6 +375,7 @@ function renderLegend(counts) {
 
 map.on("load", async () => {
   registerArrows(map);
+  addRiskLayer();
   CONDITION_LAYERS.forEach(addArrowLayer);
   POINT_LAYERS.forEach(addCircleLayer);
   renderLegend({});
@@ -418,14 +470,22 @@ async function selectHour(hour, tick) {
 
   const at = encodeURIComponent(fmtHour(hour));
   const request = ++pendingHour;
-  const [conditions, vessels, strandings] = await Promise.all([
+  const [conditions, vessels, strandings, risk] = await Promise.all([
     fetch(`/api/conditions?at=${at}`).then((response) => response.json()),
     fetch(`/api/vessels?at=${at}`).then((response) => response.json()),
     fetch(`/api/strandings?day=${fmtDay(hour)}`).then((response) => response.json()),
+    fetch(`/api/risk?at=${at}`).then((response) => response.json()),
   ]);
   if (request !== pendingHour) return;
 
-  const counts = { vessels: vessels.length, strandings: strandings.length };
+  map.setPaintProperty(RISK_LAYER.id, "line-color", riskColorExpression(risk.peak));
+  map.getSource(RISK_LAYER.id).setData(risk);
+
+  const counts = {
+    vessels: vessels.length,
+    strandings: strandings.length,
+    risk: risk.features.length,
+  };
   for (const layer of CONDITION_LAYERS) {
     const rows = conditionRows(conditions, layer);
     map.getSource(layer.id).setData(toFeatureCollection(rows));

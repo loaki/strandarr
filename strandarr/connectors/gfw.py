@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 REPORT_URL = "https://gateway.api.globalfishingwatch.org/v3/4wings/report"
 FISHING_DATASET = "public-global-fishing-effort:latest"
-TIMEOUT_SECONDS = 900
+TIMEOUT_SECONDS = 300
 
 
 def iter_positions(

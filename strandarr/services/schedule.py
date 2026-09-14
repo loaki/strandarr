@@ -7,8 +7,9 @@ from sqlalchemy import ColumnElement, SQLColumnExpression
 from sqlalchemy.orm import Session
 
 from strandarr import sources
+from strandarr.analysis import drift
 from strandarr.connectors import open_meteo
-from strandarr.models import MarineCondition, VesselPosition
+from strandarr.models import DriftRelease, MarineCondition, VesselPosition
 from strandarr.repositories import queue
 from strandarr.services import handlers
 from strandarr.services.coverage import missing_ranges, stored_days
@@ -81,6 +82,17 @@ SOURCES = (
         kind="ingest_forecast",
         handler=handlers.forecast,
         rolling=True,
+    ),
+    Source(
+        kind="compute_drift_arrivals",
+        handler=handlers.drift_arrivals,
+        first_day=MARINE_ARCHIVE_FIRST_DAY,
+        when=DriftRelease.release_at,
+        filters=(
+            DriftRelease.complete.is_(True),
+            DriftRelease.model_version == drift.MODEL_VERSION,
+        ),
+        lag_days=GFW_LAG_DAYS,
     ),
 )
 

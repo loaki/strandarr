@@ -15,3 +15,8 @@ OBSERVED_BEFORE_PREDICTED = (
     MARINE_FORECAST,
     WEATHER_FORECAST,
 )
+
+
+def precedence(source: str) -> int:
+    order = OBSERVED_BEFORE_PREDICTED
+    return order.index(source) if source in order else len(order)

@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 COASTLINE_URL = (
     "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/"
-    "v5.1.2/geojson/ne_50m_coastline.geojson"
+    "v5.1.2/geojson/ne_10m_coastline.geojson"
 )
 TIMEOUT_SECONDS = 120
 
@@ -90,4 +90,5 @@ def _segment(points: list[Point], length_km: float) -> CoastalSegment:
         center_lon=center_lon,
         length_km=length_km,
         coastline_orientation_deg=bearing_deg(start, end),
+        path=[[round(lon, 5), round(lat, 5)] for lat, lon in points],
     )

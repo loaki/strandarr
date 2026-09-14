@@ -1,3 +1,4 @@
+import math
 from collections.abc import Iterable, Iterator
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
@@ -9,7 +10,14 @@ from sqlalchemy import SQLColumnExpression, func, select
 from sqlalchemy.orm import Session as SessionType
 
 from strandarr import sources
-from strandarr.models import MarineCondition, Stranding, VesselPosition
+from strandarr.analysis import drift
+from strandarr.models import (
+    CoastalSegment,
+    DriftArrival,
+    MarineCondition,
+    Stranding,
+    VesselPosition,
+)
 from strandarr.repositories.db import Session
 
 app = FastAPI(title="strandarr")
@@ -67,11 +75,6 @@ def _bounds(
     return low, high
 
 
-def _precedence(source: str) -> int:
-    order = sources.OBSERVED_BEFORE_PREDICTED
-    return order.index(source) if source in order else len(order)
-
-
 @app.get("/api/range")
 def get_range(db: Db) -> dict[str, Any]:
     bounds = [
@@ -98,7 +101,7 @@ def get_conditions(at: Hour, db: Db) -> list[dict[str, Any]]:
 
 
 def merge_conditions(rows: Iterable[MarineCondition]) -> list[dict[str, Any]]:
-    ordered = sorted(rows, key=lambda row: _precedence(row.source))
+    ordered = sorted(rows, key=lambda row: sources.precedence(row.source))
     cells: dict[tuple[float, float], dict[str, Any]] = {}
     for row in ordered:
         cell = cells.setdefault(
@@ -130,6 +133,53 @@ def get_vessels(at: Hour, db: Db) -> list[dict[str, Any]]:
         )
     ).scalars()
     return [{field: getattr(row, field) for field in VESSEL_FIELDS} for row in rows]
+
+
+@app.get("/api/risk")
+def get_risk(at: Hour, db: Db) -> dict[str, Any]:
+    start, end = _hour(at)
+    expected = func.sum(DriftArrival.expected_count)
+    rows = db.execute(
+        select(
+            CoastalSegment.id,
+            CoastalSegment.center_lat,
+            CoastalSegment.center_lon,
+            CoastalSegment.length_km,
+            CoastalSegment.path,
+            expected.label("expected_count"),
+            func.count().label("release_days"),
+        )
+        .join(DriftArrival, DriftArrival.coastal_segment_id == CoastalSegment.id)
+        .where(
+            DriftArrival.arrival_at >= start,
+            DriftArrival.arrival_at < end,
+            DriftArrival.model_version == drift.MODEL_VERSION,
+        )
+        .group_by(CoastalSegment.id)
+        .order_by(expected.desc())
+    ).all()
+
+    features: list[dict[str, Any]] = [
+        {
+            "type": "Feature",
+            "geometry": {
+                "type": "LineString",
+                "coordinates": path or [[center_lon, center_lat]],
+            },
+            "properties": {
+                "segment_id": segment_id,
+                "lat": center_lat,
+                "lon": center_lon,
+                "length_km": length_km,
+                "expected_count": float(count),
+                "probability": 1.0 - math.exp(-float(count)),
+                "release_days": days,
+            },
+        }
+        for segment_id, center_lat, center_lon, length_km, path, count, days in rows
+    ]
+    peak = max((float(row.expected_count) for row in rows), default=0.0)
+    return {"type": "FeatureCollection", "features": features, "peak": peak}
 
 
 @app.get("/api/strandings")

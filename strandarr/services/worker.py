@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 POLL_SECONDS = 5
 DB_RETRY_SECONDS = 5
-QUOTA_PAUSE_SECONDS = 900
+QUOTA_PAUSE_SECONDS = 300
 
 
 def run_job(session: Session, job: Job) -> int:

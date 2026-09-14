@@ -1,4 +1,5 @@
 from sqlalchemy import Float, Index, String
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from strandarr.models.base import Base
@@ -15,3 +16,4 @@ class CoastalSegment(Base):
     center_lon: Mapped[float] = mapped_column(Float, nullable=False)
     length_km: Mapped[float] = mapped_column(Float, nullable=False)
     coastline_orientation_deg: Mapped[float | None] = mapped_column(Float)
+    path: Mapped[list[list[float]] | None] = mapped_column(JSONB)
