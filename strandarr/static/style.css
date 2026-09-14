@@ -81,6 +81,13 @@ html, body {
   background: #181818;
   border-top: 1px solid #333;
   white-space: nowrap;
+  cursor: grab;
+  touch-action: pan-y;
+}
+
+#timeline.dragging {
+  cursor: grabbing;
+  user-select: none;
 }
 
 #track {
@@ -92,18 +99,37 @@ html, body {
   display: flex;
   flex-direction: column;
   border-right: 1px solid #333;
+  cursor: pointer;
 }
 
 .day-label {
   text-align: center;
   font-size: 11px;
   color: #999;
-  padding: 4px 0;
+  padding: 4px 10px;
+  border-radius: 4px;
+}
+
+.day-label:hover,
+.day:not(.expanded):hover .day-label {
+  background: #242424;
+}
+
+.day.future .day-label {
+  color: #f0a020;
+}
+
+.day.selected .day-label {
+  color: #fff;
 }
 
 .hours {
-  display: flex;
+  display: none;
   flex: 1;
+}
+
+.day.expanded .hours {
+  display: flex;
 }
 
 .tick {
@@ -122,8 +148,12 @@ html, body {
   background: #292929;
 }
 
+.tick.future {
+  color: #f0a020;
+}
+
 .tick.selected {
-  background: #2b6cb0;
+  background: #3f3f3f;
   color: #fff;
 }
 

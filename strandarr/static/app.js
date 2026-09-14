@@ -240,6 +240,7 @@ const map = new maplibregl.Map({
 
 const label = document.getElementById("label");
 const legend = document.getElementById("legend");
+const timelineEl = document.getElementById("timeline");
 const track = document.getElementById("track");
 const jump = document.getElementById("jump");
 
@@ -322,6 +323,64 @@ function renderLegend(counts) {
   });
 }
 
+function enableDragScroll(el) {
+  const DRAG_THRESHOLD = 10;
+  let dragging = false;
+  let moved = false;
+  let startX = 0;
+  let startScroll = 0;
+  let pointerId = null;
+
+  const stopDrag = () => {
+    dragging = false;
+    pointerId = null;
+    el.classList.remove("dragging");
+  };
+
+  el.addEventListener("pointerdown", (event) => {
+    if (event.button !== undefined && event.button !== 0) return;
+    dragging = true;
+    moved = false;
+    startX = event.clientX;
+    startScroll = el.scrollLeft;
+    pointerId = event.pointerId;
+  });
+
+  el.addEventListener("pointermove", (event) => {
+    if (!dragging) return;
+    if (event.buttons === 0) {
+      stopDrag();
+      return;
+    }
+    const dx = event.clientX - startX;
+    if (!moved) {
+      if (Math.abs(dx) <= DRAG_THRESHOLD) return;
+      moved = true;
+      el.classList.add("dragging");
+      if (pointerId !== null) el.setPointerCapture(pointerId);
+    }
+    el.scrollLeft = startScroll - dx;
+  });
+
+  el.addEventListener("pointerup", stopDrag);
+  el.addEventListener("pointercancel", stopDrag);
+  el.addEventListener("lostpointercapture", stopDrag);
+
+  el.addEventListener(
+    "click",
+    (event) => {
+      if (moved) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      moved = false;
+    },
+    true
+  );
+}
+
+enableDragScroll(timelineEl);
+
 map.on("load", async () => {
   registerArrows(map);
   CONDITION_LAYERS.forEach(addArrowLayer);
@@ -336,12 +395,20 @@ map.on("load", async () => {
   buildTimeline(floorHour(range.min), floorHour(range.max));
 });
 
+function toggleDayExpanded(dayEl) {
+  const willExpand = !dayEl.classList.contains("expanded");
+  track.querySelectorAll(".day.expanded").forEach((d) => d.classList.remove("expanded"));
+  if (willExpand) dayEl.classList.add("expanded");
+}
+
 function buildTimeline(start, end) {
   hours = [];
   for (let at = new Date(start); at <= end; at.setUTCHours(at.getUTCHours() + 1)) {
     hours.push(new Date(at));
   }
 
+  const now = new Date();
+  const today = fmtDay(now);
   let hoursEl = null;
   let lastDay = null;
   for (const hour of hours) {
@@ -349,9 +416,14 @@ function buildTimeline(start, end) {
     if (day !== lastDay) {
       const dayEl = document.createElement("div");
       dayEl.className = "day";
+      if (day > today) dayEl.classList.add("future");
       const dayLabel = document.createElement("div");
       dayLabel.className = "day-label";
       dayLabel.textContent = day;
+      dayEl.addEventListener("click", (event) => {
+        if (event.target.closest(".tick")) return;
+        toggleDayExpanded(dayEl);
+      });
       hoursEl = document.createElement("div");
       hoursEl.className = "hours";
       dayEl.appendChild(dayLabel);
@@ -361,6 +433,7 @@ function buildTimeline(start, end) {
     }
     const tick = document.createElement("div");
     tick.className = "tick";
+    if (hour > now) tick.classList.add("future");
     tick.textContent = hour.getUTCHours();
     tick.dataset.hour = fmtHour(hour);
     tick.addEventListener("click", () => selectHour(hour, tick));
@@ -388,6 +461,17 @@ async function selectHour(hour, tick) {
   if (selectedTick) selectedTick.classList.remove("selected");
   tick.classList.add("selected");
   selectedTick = tick;
+
+  const dayEl = tick.closest(".day");
+  track.querySelectorAll(".day.selected").forEach((d) => {
+    if (d !== dayEl) d.classList.remove("selected");
+  });
+  track.querySelectorAll(".day.expanded").forEach((d) => {
+    if (d !== dayEl) d.classList.remove("expanded");
+  });
+  dayEl.classList.add("selected");
+  dayEl.classList.add("expanded");
+
   label.textContent = fmtLabel(hour);
   jump.value = fmtDay(hour);
 
