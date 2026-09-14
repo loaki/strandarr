@@ -240,7 +240,6 @@ const map = new maplibregl.Map({
 
 const label = document.getElementById("label");
 const legend = document.getElementById("legend");
-const timelineEl = document.getElementById("timeline");
 const track = document.getElementById("track");
 const jump = document.getElementById("jump");
 
@@ -322,64 +321,6 @@ function renderLegend(counts) {
     });
   });
 }
-
-function enableDragScroll(el) {
-  const DRAG_THRESHOLD = 10;
-  let dragging = false;
-  let moved = false;
-  let startX = 0;
-  let startScroll = 0;
-  let pointerId = null;
-
-  const stopDrag = () => {
-    dragging = false;
-    pointerId = null;
-    el.classList.remove("dragging");
-  };
-
-  el.addEventListener("pointerdown", (event) => {
-    if (event.button !== undefined && event.button !== 0) return;
-    dragging = true;
-    moved = false;
-    startX = event.clientX;
-    startScroll = el.scrollLeft;
-    pointerId = event.pointerId;
-  });
-
-  el.addEventListener("pointermove", (event) => {
-    if (!dragging) return;
-    if (event.buttons === 0) {
-      stopDrag();
-      return;
-    }
-    const dx = event.clientX - startX;
-    if (!moved) {
-      if (Math.abs(dx) <= DRAG_THRESHOLD) return;
-      moved = true;
-      el.classList.add("dragging");
-      if (pointerId !== null) el.setPointerCapture(pointerId);
-    }
-    el.scrollLeft = startScroll - dx;
-  });
-
-  el.addEventListener("pointerup", stopDrag);
-  el.addEventListener("pointercancel", stopDrag);
-  el.addEventListener("lostpointercapture", stopDrag);
-
-  el.addEventListener(
-    "click",
-    (event) => {
-      if (moved) {
-        event.preventDefault();
-        event.stopPropagation();
-      }
-      moved = false;
-    },
-    true
-  );
-}
-
-enableDragScroll(timelineEl);
 
 map.on("load", async () => {
   registerArrows(map);

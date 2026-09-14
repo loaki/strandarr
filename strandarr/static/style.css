@@ -81,13 +81,25 @@ html, body {
   background: #181818;
   border-top: 1px solid #333;
   white-space: nowrap;
-  cursor: grab;
-  touch-action: pan-y;
+  scrollbar-width: thin;
+  scrollbar-color: #555 #181818;
 }
 
-#timeline.dragging {
-  cursor: grabbing;
-  user-select: none;
+#timeline::-webkit-scrollbar {
+  height: 10px;
+}
+
+#timeline::-webkit-scrollbar-track {
+  background: #181818;
+}
+
+#timeline::-webkit-scrollbar-thumb {
+  background: #555;
+  border-radius: 5px;
+}
+
+#timeline::-webkit-scrollbar-thumb:hover {
+  background: #6b6b6b;
 }
 
 #track {
