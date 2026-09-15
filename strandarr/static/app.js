@@ -68,7 +68,7 @@ const CLIMATOLOGY_LAYER = {
 
 const FORECAST_LAYER = {
   id: "forecast",
-  label: "48h stranding forecast",
+  label: "Stranding forecast",
   color: "#b8342a",
   stops: ["#fdf0d5", "#f3b263", "#d1495b", "#6a1b2a"],
 };
