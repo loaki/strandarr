@@ -1,4 +1,5 @@
 from strandarr.models.base import Base
+from strandarr.models.climatology import SegmentClimatology
 from strandarr.models.coastal_segment import CoastalSegment
 from strandarr.models.drift import DriftArrival, DriftRelease
 from strandarr.models.grid_cell import GridCell
@@ -18,6 +19,7 @@ __all__ = [
     "Job",
     "JobStatus",
     "MarineCondition",
+    "SegmentClimatology",
     "Stranding",
     "VesselPosition",
 ]

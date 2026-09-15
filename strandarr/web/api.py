@@ -9,11 +9,12 @@ from sqlalchemy import SQLColumnExpression, func, select
 from sqlalchemy.orm import Session as SessionType
 
 from strandarr import kinds, sources
-from strandarr.analysis import drift
+from strandarr.analysis import climatology, drift
 from strandarr.models import (
     CoastalSegment,
     DriftArrival,
     MarineCondition,
+    SegmentClimatology,
     Stranding,
     VesselPosition,
 )
@@ -199,6 +200,60 @@ def get_risk(at: Hour, db: Db) -> dict[str, Any]:
         "release_days_expected": len(needed),
         "complete": not missing,
         "missing_release_days": [day.isoformat() for day in missing],
+    }
+
+
+@app.get("/api/climatology")
+def get_climatology(at: Hour, db: Db) -> dict[str, Any]:
+    start, _ = _hour(at)
+    day = start.date()
+    rows = db.execute(
+        select(
+            CoastalSegment.id,
+            CoastalSegment.center_lat,
+            CoastalSegment.center_lon,
+            CoastalSegment.length_km,
+            CoastalSegment.path,
+            SegmentClimatology.observed,
+            SegmentClimatology.expected_per_day,
+            SegmentClimatology.probability,
+            SegmentClimatology.years,
+        )
+        .join(
+            SegmentClimatology,
+            SegmentClimatology.coastal_segment_id == CoastalSegment.id,
+        )
+        .where(
+            SegmentClimatology.day_of_year == climatology.slot(day) + 1,
+            SegmentClimatology.model_version == climatology.MODEL_VERSION,
+        )
+        .order_by(SegmentClimatology.probability.desc())
+    ).all()
+
+    return {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "geometry": {
+                    "type": "LineString",
+                    "coordinates": row.path or [[row.center_lon, row.center_lat]],
+                },
+                "properties": {
+                    "segment_id": row.id,
+                    "lat": row.center_lat,
+                    "lon": row.center_lon,
+                    "length_km": row.length_km,
+                    "probability": float(row.probability),
+                    "expected_per_day": float(row.expected_per_day),
+                    "observed": float(row.observed),
+                    "years": row.years,
+                },
+            }
+            for row in rows
+        ],
+        "peak": max((float(row.probability) for row in rows), default=0.0),
+        "window_days": climatology.WINDOW_DAYS,
     }
 
 

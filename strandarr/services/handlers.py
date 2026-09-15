@@ -4,10 +4,12 @@ from collections.abc import Callable
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 
+import numpy as np
 from sqlalchemy import Integer, case, delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from strandarr import kinds, sources
+from strandarr.analysis import climatology as climatology_model
 from strandarr.analysis import coast, drift
 from strandarr.config import settings
 from strandarr.connectors import gbif, gfw, open_meteo, pelagis_histocarto
@@ -18,11 +20,12 @@ from strandarr.models import (
     DriftRelease,
     GridCell,
     MarineCondition,
+    SegmentClimatology,
     Stranding,
     VesselPosition,
 )
 from strandarr.repositories import store
-from strandarr.services import coverage, reference
+from strandarr.services import coverage, observations, reference
 
 logger = logging.getLogger(__name__)
 
@@ -272,3 +275,42 @@ def drift_arrivals(session: Session, kind: str, payload: dict[str, Any]) -> int:
         )
         total += len(result.arrivals)
     return total
+
+
+def climatology(session: Session, kind: str, payload: dict[str, Any]) -> int:
+    segments = reference.segments(session)
+    observed, unmatched = observations.snapped(session, segments)
+    model = climatology_model.build(
+        ((item.segment, item.day) for item in observed), len(segments)
+    )
+    logger.info(
+        "climatology: %d stranding(s) over %d year(s), %d beyond %.0f km, dropped",
+        len(observed),
+        len(model.years),
+        unmatched,
+        observations.SNAP_RADIUS_KM,
+    )
+
+    rate, chance = model.rate, model.chance
+    rows = [
+        SegmentClimatology(
+            coastal_segment_id=segments[position].id,
+            day_of_year=int(slot) + 1,
+            model_version=climatology_model.MODEL_VERSION,
+            observed=float(model.total[position, slot]),
+            expected_per_day=float(rate[position, slot]),
+            probability=float(chance[position, slot]),
+            years=len(model.years),
+        )
+        for position, slot in zip(*np.nonzero(model.total), strict=True)
+    ]
+
+    session.execute(
+        delete(SegmentClimatology).where(
+            SegmentClimatology.model_version == climatology_model.MODEL_VERSION
+        )
+    )
+    written = store.upsert(session, SegmentClimatology, rows, overwrite=True)
+    session.commit()
+    logger.info("climatology: %d segment-day(s) stored", written)
+    return written

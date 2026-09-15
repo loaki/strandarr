@@ -83,6 +83,11 @@ SOURCES = (
         first_day=MARINE_ARCHIVE_FIRST_DAY,
         lag_days=GFW_LAG_DAYS,
     ),
+    Source(
+        kind=kinds.CLIMATOLOGY,
+        handler=handlers.climatology,
+        rolling=True,
+    ),
 )
 
 BY_KIND = {source.kind: source for source in SOURCES}

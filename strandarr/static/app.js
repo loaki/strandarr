@@ -59,7 +59,19 @@ const RISK_LAYER = {
   stops: ["#f7e8c8", "#e8a33d", "#c0392b", "#6b1d6b"],
 };
 
-const LAYERS = [RISK_LAYER, ...CONDITION_LAYERS, ...POINT_LAYERS];
+const CLIMATOLOGY_LAYER = {
+  id: "climatology",
+  label: "Seasonal stranding chance",
+  color: "#1b7a5a",
+  stops: ["#e8f3ec", "#7fc5a3", "#2e8b62", "#0d4a30"],
+};
+
+const LAYERS = [
+  RISK_LAYER,
+  CLIMATOLOGY_LAYER,
+  ...CONDITION_LAYERS,
+  ...POINT_LAYERS,
+];
 
 const FIELD_LABELS = {
   mmsi: "MMSI",
@@ -93,6 +105,10 @@ const FIELD_LABELS = {
   sea_surface_temperature_c: "Sea temperature",
   sea_level_m: "Tide height",
   drift_index: "Drift index (unitless)",
+  probability: "Chance of a stranding",
+  expected_per_day: "Expected strandings / day",
+  observed: "Strandings on record",
+  years: "Years on record",
   relative_index: "Share of the hour's peak",
   release_days: "Contributing release days",
   length_km: "Segment length",
@@ -211,10 +227,15 @@ const fmtHour = (at) => at.toISOString();
 const fmtDay = (at) => at.toISOString().slice(0, 10);
 const fmtLabel = (at) => at.toUTCString().slice(0, 22) + " UTC";
 
+const PERCENT = new Set(["probability"]);
+
 function fmtValue(key, value) {
   if (value === null || value === undefined || value === "") return "—";
   if (Array.isArray(value)) return value.join(", ");
-  if (key === "drift_index") return Number(value).toPrecision(3);
+  if (PERCENT.has(key)) return (value * 100).toFixed(1) + " %";
+  if (key === "drift_index" || key === "expected_per_day") {
+    return Number(value).toPrecision(3);
+  }
   if (key in DIRECTION_SENSE) {
     return `${DIRECTION_SENSE[key]} ${Math.round(value)}°`;
   }
@@ -312,6 +333,32 @@ function riskColorExpression(peak) {
   return expression;
 }
 
+function climatologyColorExpression(peak) {
+  const top = peak > 0 ? peak : 1;
+  const expression = ["interpolate", ["linear"], ["get", "probability"]];
+  for (let i = 0; i < CLIMATOLOGY_LAYER.stops.length; i++) {
+    const at = (top * i) / (CLIMATOLOGY_LAYER.stops.length - 1);
+    expression.push(at, CLIMATOLOGY_LAYER.stops[i]);
+  }
+  return expression;
+}
+
+function addClimatologyLayer() {
+  map.addSource(CLIMATOLOGY_LAYER.id, { type: "geojson", data: EMPTY });
+  map.addLayer({
+    id: CLIMATOLOGY_LAYER.id,
+    type: "line",
+    source: CLIMATOLOGY_LAYER.id,
+    layout: { "line-cap": "round", "line-join": "round" },
+    paint: {
+      "line-color": climatologyColorExpression(1),
+      "line-width": ["interpolate", ["linear"], ["zoom"], 5, 3, 10, 12],
+      "line-opacity": 0.85,
+    },
+  });
+  bindPopup(CLIMATOLOGY_LAYER.id);
+}
+
 function addRiskLayer() {
   map.addSource(RISK_LAYER.id, { type: "geojson", data: EMPTY });
   map.addLayer({
@@ -375,6 +422,7 @@ function renderLegend(counts, notes = {}) {
 map.on("load", async () => {
   registerArrows(map);
   addRiskLayer();
+  addClimatologyLayer();
   CONDITION_LAYERS.forEach(addArrowLayer);
   POINT_LAYERS.forEach(addCircleLayer);
   renderLegend({});
@@ -469,22 +517,30 @@ async function selectHour(hour, tick) {
 
   const at = encodeURIComponent(fmtHour(hour));
   const request = ++pendingHour;
-  const [conditions, vessels, strandings, risk] = await Promise.all([
+  const [conditions, vessels, strandings, risk, climatology] = await Promise.all([
     fetch(`/api/conditions?at=${at}`).then((response) => response.json()),
     fetch(`/api/vessels?at=${at}`).then((response) => response.json()),
     fetch(`/api/strandings?day=${fmtDay(hour)}`).then((response) => response.json()),
     fetch(`/api/risk?at=${at}`).then((response) => response.json()),
+    fetch(`/api/climatology?at=${at}`).then((response) => response.json()),
   ]);
   if (request !== pendingHour) return;
 
   map.setPaintProperty(RISK_LAYER.id, "line-color", riskColorExpression(risk.peak));
   map.getSource(RISK_LAYER.id).setData(risk);
+  map.setPaintProperty(
+    CLIMATOLOGY_LAYER.id,
+    "line-color",
+    climatologyColorExpression(climatology.peak),
+  );
+  map.getSource(CLIMATOLOGY_LAYER.id).setData(climatology);
 
   const missing = risk.missing_release_days ?? [];
   const counts = {
     vessels: vessels.length,
     strandings: strandings.length,
     risk: risk.features.length,
+    climatology: climatology.features.length,
   };
   const notes = missing.length
     ? {

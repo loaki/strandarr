@@ -8,24 +8,18 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from strandarr import kinds
-from strandarr.analysis import Float, Mask, coast, skill
+from strandarr.analysis import Float, Mask, climatology, skill
 from strandarr.analysis.drift import MAX_DRIFT_DAYS, MODEL_VERSION
-from strandarr.models import DriftArrival, Stranding
-from strandarr.services import coverage, reference
+from strandarr.models import DriftArrival
+from strandarr.services import coverage, observations, reference
+from strandarr.services.observations import SNAP_RADIUS_KM, Observation
 
 logger = logging.getLogger(__name__)
 
-SNAP_RADIUS_KM = 15.0
 TOP_K = (10, 25, 50)
 ALL = "all"
 
-
-@dataclass(frozen=True)
-class Observation:
-    day: date
-    segment: int
-    individuals: int
-    precision: str
+__all__ = ["SNAP_RADIUS_KM", "Observation", "Report", "Validation", "evaluate"]
 
 
 @dataclass(frozen=True)
@@ -50,35 +44,6 @@ class Validation:
 
 def _midnight(day: date) -> datetime:
     return datetime.combine(day, datetime.min.time(), tzinfo=UTC)
-
-
-def _observations(session: Session, snap: coast.Coast) -> tuple[list[Observation], int]:
-    rows = session.execute(
-        select(
-            Stranding.recorded_at,
-            Stranding.lat,
-            Stranding.lon,
-            Stranding.individual_count,
-            Stranding.location_precision,
-        )
-    ).all()
-    if not rows:
-        return [], 0
-    segment, distance = snap.lookup(
-        np.array([row.lat for row in rows], dtype=np.float64),
-        np.array([row.lon for row in rows], dtype=np.float64),
-    )
-    observed = [
-        Observation(
-            day=row.recorded_at.astimezone(UTC).date(),
-            segment=int(index),
-            individuals=row.individual_count,
-            precision=row.location_precision or "unknown",
-        )
-        for row, index, km in zip(rows, segment, distance, strict=True)
-        if index >= 0 and km <= SNAP_RADIUS_KM
-    ]
-    return observed, len(rows) - len(observed)
 
 
 def _model(session: Session, start: date, end: date) -> dict[date, dict[int, float]]:
@@ -112,24 +77,11 @@ def _eligible(session: Session, start: date, end: date, minimum: int) -> set[dat
     }
 
 
-def _climatology(
+def _baseline(
     observed: Sequence[Observation], segments: int
 ) -> Callable[[date], Float]:
-    years = sorted({item.day.year for item in observed})
-    slot = {year: position for position, year in enumerate(years)}
-    counts = np.zeros((segments, 12, max(len(years), 1)), dtype=np.float64)
-    for item in observed:
-        counts[item.segment, item.day.month - 1, slot[item.day.year]] += 1.0
-    totals = counts.sum(axis=2)
-
-    def score(day: date) -> Float:
-        column = totals[:, day.month - 1]
-        position = slot.get(day.year)
-        if position is None:
-            return np.asarray(column)
-        return np.asarray(column - counts[:, day.month - 1, position])
-
-    return score
+    model = climatology.build(((item.segment, item.day) for item in observed), segments)
+    return lambda day: model.observed(day, without=day.year)
 
 
 def _vector(scores: dict[int, float], index: dict[int, int], segments: int) -> Float:
@@ -192,8 +144,7 @@ def evaluate(
         raise ValueError(f"start {start} is after end {end}")
     segments = reference.segments(session)
     index = {segment.id: position for position, segment in enumerate(segments)}
-    snap = coast.build(segments, SNAP_RADIUS_KM)
-    observed, unmatched = _observations(session, snap)
+    observed, unmatched = observations.snapped(session, segments)
     model = _model(session, start, end)
     eligible = _eligible(session, start, end, min_release_days)
     logger.info(
@@ -205,7 +156,7 @@ def evaluate(
         len(eligible),
         min_release_days,
     )
-    baseline = _climatology(observed, len(segments))
+    baseline = _baseline(observed, len(segments))
     return Validation(
         start=start,
         end=end,
