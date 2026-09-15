@@ -66,7 +66,15 @@ const CLIMATOLOGY_LAYER = {
   stops: ["#e8f3ec", "#7fc5a3", "#2e8b62", "#0d4a30"],
 };
 
+const FORECAST_LAYER = {
+  id: "forecast",
+  label: "48h stranding forecast",
+  color: "#b8342a",
+  stops: ["#fdf0d5", "#f3b263", "#d1495b", "#6a1b2a"],
+};
+
 const LAYERS = [
+  FORECAST_LAYER,
   RISK_LAYER,
   CLIMATOLOGY_LAYER,
   ...CONDITION_LAYERS,
@@ -106,6 +114,9 @@ const FIELD_LABELS = {
   sea_level_m: "Tide height",
   drift_index: "Drift index (unitless)",
   probability: "Chance of a stranding",
+  persistence: "Recent strandings nearby",
+  swell_m: "Swell height",
+  onshore_m: "Onshore wave",
   expected_per_day: "Expected strandings / day",
   observed: "Strandings on record",
   years: "Years on record",
@@ -116,6 +127,8 @@ const FIELD_LABELS = {
 };
 
 const UNITS = {
+  swell_m: " m",
+  onshore_m: " m",
   wind_speed_kmh: " km/h",
   current_speed_kmh: " km/h",
   wave_height_m: " m",
@@ -359,6 +372,32 @@ function addClimatologyLayer() {
   bindPopup(CLIMATOLOGY_LAYER.id);
 }
 
+function forecastColorExpression(peak) {
+  const top = peak > 0 ? peak : 1;
+  const expression = ["interpolate", ["linear"], ["get", "probability"]];
+  for (let i = 0; i < FORECAST_LAYER.stops.length; i++) {
+    const at = (top * i) / (FORECAST_LAYER.stops.length - 1);
+    expression.push(at, FORECAST_LAYER.stops[i]);
+  }
+  return expression;
+}
+
+function addForecastLayer() {
+  map.addSource(FORECAST_LAYER.id, { type: "geojson", data: EMPTY });
+  map.addLayer({
+    id: FORECAST_LAYER.id,
+    type: "line",
+    source: FORECAST_LAYER.id,
+    layout: { "line-cap": "round", "line-join": "round" },
+    paint: {
+      "line-color": forecastColorExpression(1),
+      "line-width": ["interpolate", ["linear"], ["zoom"], 5, 3.5, 10, 14],
+      "line-opacity": 0.9,
+    },
+  });
+  bindPopup(FORECAST_LAYER.id);
+}
+
 function addRiskLayer() {
   map.addSource(RISK_LAYER.id, { type: "geojson", data: EMPTY });
   map.addLayer({
@@ -422,6 +461,7 @@ function renderLegend(counts, notes = {}) {
 map.on("load", async () => {
   registerArrows(map);
   addRiskLayer();
+  addForecastLayer();
   addClimatologyLayer();
   CONDITION_LAYERS.forEach(addArrowLayer);
   POINT_LAYERS.forEach(addCircleLayer);
@@ -517,12 +557,14 @@ async function selectHour(hour, tick) {
 
   const at = encodeURIComponent(fmtHour(hour));
   const request = ++pendingHour;
-  const [conditions, vessels, strandings, risk, climatology] = await Promise.all([
+  const [conditions, vessels, strandings, risk, climatology, forecast] =
+    await Promise.all([
     fetch(`/api/conditions?at=${at}`).then((response) => response.json()),
     fetch(`/api/vessels?at=${at}`).then((response) => response.json()),
     fetch(`/api/strandings?day=${fmtDay(hour)}`).then((response) => response.json()),
     fetch(`/api/risk?at=${at}`).then((response) => response.json()),
     fetch(`/api/climatology?at=${at}`).then((response) => response.json()),
+    fetch(`/api/forecast?at=${at}`).then((response) => response.json()),
   ]);
   if (request !== pendingHour) return;
 
@@ -534,6 +576,12 @@ async function selectHour(hour, tick) {
     climatologyColorExpression(climatology.peak),
   );
   map.getSource(CLIMATOLOGY_LAYER.id).setData(climatology);
+  map.setPaintProperty(
+    FORECAST_LAYER.id,
+    "line-color",
+    forecastColorExpression(forecast.peak),
+  );
+  map.getSource(FORECAST_LAYER.id).setData(forecast);
 
   const missing = risk.missing_release_days ?? [];
   const counts = {
@@ -541,6 +589,7 @@ async function selectHour(hour, tick) {
     strandings: strandings.length,
     risk: risk.features.length,
     climatology: climatology.features.length,
+    forecast: forecast.features.length,
   };
   const notes = missing.length
     ? {

@@ -16,7 +16,7 @@ from strandarr.connectors import gbif, gfw, open_meteo, pelagis_histocarto
 from strandarr.geo import Point
 from strandarr.grid import BBOX, cell, grid_points
 from strandarr.models import (
-    DriftArrival,
+    DriftDaily,
     DriftRelease,
     GridCell,
     MarineCondition,
@@ -108,7 +108,7 @@ def archive(product: open_meteo.Product) -> Handler:
     return handler
 
 
-def forecast(session: Session, kind: str, payload: dict[str, Any]) -> int:
+def marine_forecast(session: Session, kind: str, payload: dict[str, Any]) -> int:
     points = requested_points(session)
     total = 0
     for product in open_meteo.FORECASTS:
@@ -222,23 +222,28 @@ def drift_arrivals(session: Session, kind: str, payload: dict[str, Any]) -> int:
         result = drift.simulate(seeds, _forcing(session, day), raster)
 
         session.execute(
-            delete(DriftArrival).where(
-                DriftArrival.release_at == released_at,
-                DriftArrival.model_version == drift.MODEL_VERSION,
+            delete(DriftDaily).where(
+                DriftDaily.release_day == day,
+                DriftDaily.model_version == drift.MODEL_VERSION,
             )
         )
+        totals: dict[tuple[date, int], float] = {}
+        for arrival in result.arrivals:
+            landed = (released_at + timedelta(hours=arrival.hour)).date()
+            key = (landed, arrival.segment_id)
+            totals[key] = totals.get(key, 0.0) + arrival.drift_index
         store.upsert(
             session,
-            DriftArrival,
+            DriftDaily,
             [
-                DriftArrival(
-                    release_at=released_at,
+                DriftDaily(
+                    release_day=day,
+                    day=landed,
+                    coastal_segment_id=segment_id,
                     model_version=drift.MODEL_VERSION,
-                    coastal_segment_id=arrival.segment_id,
-                    arrival_at=released_at + timedelta(hours=arrival.hour),
-                    drift_index=arrival.drift_index,
+                    drift_index=value,
                 )
-                for arrival in result.arrivals
+                for (landed, segment_id), value in totals.items()
             ],
         )
         store.upsert(

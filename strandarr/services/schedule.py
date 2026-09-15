@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from strandarr import kinds
 from strandarr.connectors import open_meteo
 from strandarr.repositories import queue
-from strandarr.services import coverage, handlers
+from strandarr.services import coverage, forecast, handlers
 from strandarr.services.handlers import Handler
 
 logger = logging.getLogger(__name__)
@@ -74,7 +74,7 @@ SOURCES = (
     ),
     Source(
         kind=kinds.FORECAST,
-        handler=handlers.forecast,
+        handler=handlers.marine_forecast,
         rolling=True,
     ),
     Source(
@@ -87,6 +87,11 @@ SOURCES = (
         kind=kinds.CLIMATOLOGY,
         handler=handlers.climatology,
         rolling=True,
+    ),
+    Source(
+        kind=kinds.FORECAST_ZONES,
+        handler=forecast.build,
+        first_day=MARINE_ARCHIVE_FIRST_DAY,
     ),
 )
 

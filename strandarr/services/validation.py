@@ -1,7 +1,7 @@
 import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, timedelta
 
 import numpy as np
 from sqlalchemy import func, select
@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from strandarr import kinds
 from strandarr.analysis import Float, Mask, climatology, skill
 from strandarr.analysis.drift import MAX_DRIFT_DAYS, MODEL_VERSION
-from strandarr.models import DriftArrival
+from strandarr.models import DriftDaily
 from strandarr.services import coverage, observations, reference
 from strandarr.services.observations import SNAP_RADIUS_KM, Observation
 
@@ -19,7 +19,16 @@ logger = logging.getLogger(__name__)
 TOP_K = (10, 25, 50)
 ALL = "all"
 
-__all__ = ["SNAP_RADIUS_KM", "Observation", "Report", "Validation", "evaluate"]
+__all__ = [
+    "SNAP_RADIUS_KM",
+    "Observation",
+    "Report",
+    "Validation",
+    "drift_scores",
+    "eligible_days",
+    "evaluate",
+    "vector",
+]
 
 
 @dataclass(frozen=True)
@@ -42,20 +51,21 @@ class Validation:
     reports: list[Report]
 
 
-def _midnight(day: date) -> datetime:
-    return datetime.combine(day, datetime.min.time(), tzinfo=UTC)
-
-
-def _model(session: Session, start: date, end: date) -> dict[date, dict[int, float]]:
-    at = func.date(func.timezone("UTC", DriftArrival.arrival_at))
+def drift_scores(
+    session: Session, start: date, end: date
+) -> dict[date, dict[int, float]]:
     rows = session.execute(
-        select(at, DriftArrival.coastal_segment_id, func.sum(DriftArrival.drift_index))
-        .where(
-            DriftArrival.arrival_at >= _midnight(start),
-            DriftArrival.arrival_at < _midnight(end) + timedelta(days=1),
-            DriftArrival.model_version == MODEL_VERSION,
+        select(
+            DriftDaily.day,
+            DriftDaily.coastal_segment_id,
+            func.sum(DriftDaily.drift_index),
         )
-        .group_by(at, DriftArrival.coastal_segment_id)
+        .where(
+            DriftDaily.day >= start,
+            DriftDaily.day <= end,
+            DriftDaily.model_version == MODEL_VERSION,
+        )
+        .group_by(DriftDaily.day, DriftDaily.coastal_segment_id)
     ).all()
     scores: dict[date, dict[int, float]] = {}
     for day, segment_id, total in rows:
@@ -63,7 +73,7 @@ def _model(session: Session, start: date, end: date) -> dict[date, dict[int, flo
     return scores
 
 
-def _eligible(session: Session, start: date, end: date, minimum: int) -> set[date]:
+def eligible_days(session: Session, start: date, end: date, minimum: int) -> set[date]:
     first = start - timedelta(days=MAX_DRIFT_DAYS - 1)
     simulated = coverage.covered_days(session, kinds.DRIFT_ARRIVALS, first, end)
     return {
@@ -84,7 +94,7 @@ def _baseline(
     return lambda day: model.observed(day, without=day.year)
 
 
-def _vector(scores: dict[int, float], index: dict[int, int], segments: int) -> Float:
+def vector(scores: dict[int, float], index: dict[int, int], segments: int) -> Float:
     row = np.zeros(segments, dtype=np.float64)
     for segment_id, value in scores.items():
         position = index.get(segment_id)
@@ -124,10 +134,7 @@ def _report(
         records=records,
         individuals=individuals,
         model=skill.evaluate(
-            (
-                (_vector(model.get(day, {}), index, segments), masks[day])
-                for day in days
-            ),
+            ((vector(model.get(day, {}), index, segments), masks[day]) for day in days),
             TOP_K,
         ),
         baseline=skill.evaluate(((baseline(day), masks[day]) for day in days), TOP_K),
@@ -145,8 +152,8 @@ def evaluate(
     segments = reference.segments(session)
     index = {segment.id: position for position, segment in enumerate(segments)}
     observed, unmatched = observations.snapped(session, segments)
-    model = _model(session, start, end)
-    eligible = _eligible(session, start, end, min_release_days)
+    model = drift_scores(session, start, end)
+    eligible = eligible_days(session, start, end, min_release_days)
     logger.info(
         "validation: %d stranding(s) matched, %d beyond %.0f km, "
         "%d day(s) with at least %d simulated release day(s)",

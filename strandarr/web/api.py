@@ -10,11 +10,13 @@ from sqlalchemy.orm import Session as SessionType
 
 from strandarr import kinds, sources
 from strandarr.analysis import climatology, drift
+from strandarr.analysis import forecast as forecast_model
 from strandarr.models import (
     CoastalSegment,
-    DriftArrival,
+    DriftDaily,
     MarineCondition,
     SegmentClimatology,
+    SegmentForecast,
     Stranding,
     VesselPosition,
 )
@@ -145,14 +147,14 @@ def _release_days(start: datetime) -> list[date]:
 
 @app.get("/api/risk")
 def get_risk(at: Hour, db: Db) -> dict[str, Any]:
-    start, end = _hour(at)
+    start, _ = _hour(at)
     needed = _release_days(start)
     simulated = coverage.covered_days(
         db, kinds.DRIFT_ARRIVALS, min(needed), max(needed)
     )
     missing = sorted(set(needed) - simulated)
 
-    index = func.sum(DriftArrival.drift_index)
+    index = func.sum(DriftDaily.drift_index)
     rows = db.execute(
         select(
             CoastalSegment.id,
@@ -163,11 +165,10 @@ def get_risk(at: Hour, db: Db) -> dict[str, Any]:
             index.label("drift_index"),
             func.count().label("release_days"),
         )
-        .join(DriftArrival, DriftArrival.coastal_segment_id == CoastalSegment.id)
+        .join(DriftDaily, DriftDaily.coastal_segment_id == CoastalSegment.id)
         .where(
-            DriftArrival.arrival_at >= start,
-            DriftArrival.arrival_at < end,
-            DriftArrival.model_version == drift.MODEL_VERSION,
+            DriftDaily.day == start.date(),
+            DriftDaily.model_version == drift.MODEL_VERSION,
         )
         .group_by(CoastalSegment.id)
         .order_by(index.desc())
@@ -254,6 +255,60 @@ def get_climatology(at: Hour, db: Db) -> dict[str, Any]:
         ],
         "peak": max((float(row.probability) for row in rows), default=0.0),
         "window_days": climatology.WINDOW_DAYS,
+    }
+
+
+@app.get("/api/forecast")
+def get_forecast(at: Hour, db: Db) -> dict[str, Any]:
+    start, _ = _hour(at)
+    rows = db.execute(
+        select(
+            CoastalSegment.id,
+            CoastalSegment.center_lat,
+            CoastalSegment.center_lon,
+            CoastalSegment.length_km,
+            CoastalSegment.path,
+            SegmentForecast.probability,
+            SegmentForecast.persistence,
+            SegmentForecast.drift_index,
+            SegmentForecast.swell_m,
+            SegmentForecast.onshore_m,
+        )
+        .join(
+            SegmentForecast,
+            SegmentForecast.coastal_segment_id == CoastalSegment.id,
+        )
+        .where(
+            SegmentForecast.day == start.date(),
+            SegmentForecast.model_version == forecast_model.MODEL_VERSION,
+        )
+        .order_by(SegmentForecast.probability.desc())
+    ).all()
+    return {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "geometry": {
+                    "type": "LineString",
+                    "coordinates": row.path or [[row.center_lon, row.center_lat]],
+                },
+                "properties": {
+                    "segment_id": row.id,
+                    "lat": row.center_lat,
+                    "lon": row.center_lon,
+                    "length_km": row.length_km,
+                    "probability": float(row.probability),
+                    "persistence": float(row.persistence),
+                    "drift_index": float(row.drift_index),
+                    "swell_m": float(row.swell_m),
+                    "onshore_m": float(row.onshore_m),
+                },
+            }
+            for row in rows
+        ],
+        "peak": max((float(r.probability) for r in rows), default=0.0),
+        "rank": [r.id for r in rows[:50]],
     }
 
 

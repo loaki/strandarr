@@ -14,6 +14,17 @@ class Skill:
     capture: dict[int, float]
 
 
+TIE_TOLERANCE = 1e-9
+
+
+def quantise(values: Float, tolerance: float = TIE_TOLERANCE) -> Float:
+    largest = float(np.max(np.abs(values))) if values.size else 0.0
+    if largest == 0.0:
+        return values
+    step = largest * tolerance
+    return np.asarray(np.round(values / step) * step)
+
+
 def mid_ranks(values: Float) -> Float:
     order = np.argsort(values, kind="stable")
     sorted_values = values[order]
@@ -39,7 +50,7 @@ def evaluate(pairs: Iterable[tuple[Float, Mask]], top_k: Sequence[int]) -> Skill
             continue
         days += 1
         positives += found
-        ranks = mid_ranks(scores)
+        ranks = mid_ranks(quantise(scores))
         best = scores.size + 1 - ranks[positive]
         for k in top_k:
             hits[k] += int((best <= k).sum())

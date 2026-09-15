@@ -4,7 +4,7 @@ from datetime import date
 from strandarr import log
 from strandarr.analysis.drift import MAX_DRIFT_DAYS
 from strandarr.repositories.db import Session
-from strandarr.services import aisstream, reference, validation, worker
+from strandarr.services import aisstream, experiment, reference, validation, worker
 from strandarr.services.schedule import (
     DEFAULT_BACKFILL_DAYS,
     MARINE_ARCHIVE_FIRST_DAY,
@@ -71,6 +71,31 @@ def _parser() -> argparse.ArgumentParser:
         f"(default: {MAX_DRIFT_DAYS})",
     )
 
+    explore = commands.add_parser(
+        "experiment",
+        help="search for a drift scoring recipe that beats climatology",
+    )
+    explore.add_argument(
+        "--start",
+        type=_date,
+        metavar="YYYY-MM-DD",
+        help=f"first day to score (default: {MARINE_ARCHIVE_FIRST_DAY})",
+    )
+    explore.add_argument(
+        "--end",
+        type=_date,
+        metavar="YYYY-MM-DD",
+        help="last day to score (default: today)",
+    )
+    explore.add_argument(
+        "--min-release-days",
+        type=int,
+        default=MAX_DRIFT_DAYS,
+        metavar="N",
+        help=f"simulated release days required per scored day "
+        f"(default: {MAX_DRIFT_DAYS})",
+    )
+
     commands.add_parser("worker", help="consume queued jobs until stopped")
     commands.add_parser("aisstream", help="record the live AIS feed until stopped")
     commands.add_parser(
@@ -114,6 +139,28 @@ def _print(result: validation.Validation) -> None:
             )
 
 
+def _print_search(data: experiment.Dataset) -> None:
+    mean, share, covered = experiment.sparsity(data)
+    print(
+        f"{len(data.days)} scorable day(s) with strandings, {data.size} segments\n"
+        f"drift is non-zero on {mean:.0f} segment(s) per day ({share:.1f} % of the "
+        f"coast); {covered:.1f} % of strandings fall on a segment drift scored "
+        f"above zero"
+    )
+    header = f"{'recipe':<28}{'auc':>8}" + "".join(
+        f"{f'top{k}':>8}" for k in experiment.TOP_K
+    )
+    for title, stage in experiment.search(data):
+        print(f"\n== {title}")
+        print(header)
+        for variant, measured in stage:
+            auc = "-" if measured.auc is None else f"{measured.auc:.3f}"
+            print(
+                f"{variant.label:<28}{auc:>8}"
+                + "".join(f"{measured.capture[k]:>8.3f}" for k in experiment.TOP_K)
+            )
+
+
 def main() -> None:
     args = _parser().parse_args()
     log.setup()
@@ -135,6 +182,16 @@ def _run(args: argparse.Namespace) -> None:
         with Session() as session:
             _print(
                 validation.evaluate(
+                    session,
+                    start=args.start or MARINE_ARCHIVE_FIRST_DAY,
+                    end=args.end or date.today(),
+                    min_release_days=args.min_release_days,
+                )
+            )
+    elif args.command == "experiment":
+        with Session() as session:
+            _print_search(
+                experiment.load(
                     session,
                     start=args.start or MARINE_ARCHIVE_FIRST_DAY,
                     end=args.end or date.today(),
