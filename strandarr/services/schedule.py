@@ -1,18 +1,14 @@
 import logging
-from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from dataclasses import dataclass
+from datetime import date, timedelta
 from typing import Any
 
-from sqlalchemy import ColumnElement, SQLColumnExpression
 from sqlalchemy.orm import Session
 
-from strandarr import sources
-from strandarr.analysis import drift
+from strandarr import kinds
 from strandarr.connectors import open_meteo
-from strandarr.models import DriftRelease, MarineCondition, VesselPosition
 from strandarr.repositories import queue
-from strandarr.services import handlers
-from strandarr.services.coverage import missing_ranges, stored_days
+from strandarr.services import coverage, handlers
 from strandarr.services.handlers import Handler
 
 logger = logging.getLogger(__name__)
@@ -26,17 +22,19 @@ GBIF_LAST_DAY = date(2022, 12, 31)
 HISTOCARTO_FIRST_DAY = date(2023, 1, 1)
 GFW_FIRST_DAY = date(2012, 1, 1)
 
+CHUNK_EPOCH = ERA5_FIRST_DAY
+CHUNK_DAYS = open_meteo.DAYS_PER_REQUEST
+
 
 @dataclass(frozen=True, eq=False)
 class Source:
     kind: str
     handler: Handler
     first_day: date = date.min
-    when: SQLColumnExpression[datetime] | None = None
-    filters: tuple[ColumnElement[bool], ...] = field(default=())
     lag_days: int = 0
     last_day: date | None = None
     rolling: bool = False
+    tracked: bool = True
 
     def window(self, start: date, end: date) -> tuple[date, date] | None:
         available = date.today() - timedelta(days=self.lag_days)
@@ -47,51 +45,42 @@ class Source:
 
 SOURCES = (
     Source(
-        kind="ingest_vessel_positions",
+        kind=kinds.VESSEL_POSITIONS,
         handler=handlers.vessel_positions,
         first_day=GFW_FIRST_DAY,
-        when=VesselPosition.recorded_at,
-        filters=(VesselPosition.source == sources.GFW_FISHING,),
         lag_days=GFW_LAG_DAYS,
     ),
     Source(
-        kind="ingest_weather_archive",
+        kind=kinds.WEATHER_ARCHIVE,
         handler=handlers.archive(open_meteo.WEATHER_ARCHIVE),
         first_day=ERA5_FIRST_DAY,
-        when=MarineCondition.valid_at,
-        filters=(MarineCondition.source == sources.WEATHER_ARCHIVE,),
     ),
     Source(
-        kind="ingest_marine_archive",
+        kind=kinds.MARINE_ARCHIVE,
         handler=handlers.archive(open_meteo.MARINE_ARCHIVE),
         first_day=MARINE_ARCHIVE_FIRST_DAY,
-        when=MarineCondition.valid_at,
-        filters=(MarineCondition.source == sources.MARINE_ARCHIVE,),
     ),
     Source(
-        kind="ingest_strandings_gbif",
+        kind=kinds.STRANDINGS_GBIF,
         handler=handlers.strandings_gbif,
         last_day=GBIF_LAST_DAY,
+        tracked=False,
     ),
     Source(
-        kind="ingest_strandings_histocarto",
+        kind=kinds.STRANDINGS_HISTOCARTO,
         handler=handlers.strandings_histocarto,
         first_day=HISTOCARTO_FIRST_DAY,
+        tracked=False,
     ),
     Source(
-        kind="ingest_forecast",
+        kind=kinds.FORECAST,
         handler=handlers.forecast,
         rolling=True,
     ),
     Source(
-        kind="compute_drift_arrivals",
+        kind=kinds.DRIFT_ARRIVALS,
         handler=handlers.drift_arrivals,
         first_day=MARINE_ARCHIVE_FIRST_DAY,
-        when=DriftRelease.release_at,
-        filters=(
-            DriftRelease.complete.is_(True),
-            DriftRelease.model_version == drift.MODEL_VERSION,
-        ),
         lag_days=GFW_LAG_DAYS,
     ),
 )
@@ -125,7 +114,7 @@ def schedule_missing(
             count += 1
         if skipped:
             logger.info(
-                "%s: %d range(s) already queued, not enqueued again",
+                "%s: %d chunk(s) already queued, not enqueued again",
                 source.kind,
                 skipped,
             )
@@ -135,8 +124,12 @@ def schedule_missing(
     return count
 
 
-def _window_key(payload: dict[str, Any]) -> tuple[str | None, str | None]:
-    return payload.get("start"), payload.get("end")
+def _window_key(payload: dict[str, Any]) -> tuple[str | None, str | None, bool]:
+    return payload.get("start"), payload.get("end"), bool(payload.get("force"))
+
+
+def _payload(start: date, end: date, force: bool) -> dict[str, Any]:
+    return {"start": start.isoformat(), "end": end.isoformat(), "force": force}
 
 
 def _payloads(
@@ -163,28 +156,28 @@ def _payloads(
         logger.info(
             "%s: clamped to its coverage, %s..%s", source.kind, source_start, source_end
         )
+    if not source.tracked:
+        return [_payload(source_start, source_end, force)]
+
+    covered = (
+        set()
+        if force
+        else coverage.covered_days(session, source.kind, source_start, source_end)
+    )
+    if covered:
+        logger.info("%s: %d day(s) already covered, skipped", source.kind, len(covered))
     return [
-        {
-            "start": range_start.isoformat(),
-            "end": range_end.isoformat(),
-            "force": force,
-        }
-        for range_start, range_end in _ranges(
-            session, source, source_start, source_end, force
-        )
+        _payload(first, last, force)
+        for first, last in _chunks(source_start, source_end, covered)
     ]
 
 
-def _ranges(
-    session: Session, source: Source, start: date, end: date, force: bool
-) -> list[tuple[date, date]]:
-    if force or source.when is None:
-        return [(start, end)]
-    stored = stored_days(session, source.when, start, end, source.filters)
-    ranges = missing_ranges(start, end, stored)
-    skipped = (
-        (end - start).days + 1 - sum((last - first).days + 1 for first, last in ranges)
-    )
-    if skipped:
-        logger.info("%s: %d day(s) already stored, skipped", source.kind, skipped)
-    return ranges
+def _chunk(day: date) -> tuple[date, date]:
+    bucket = (day - CHUNK_EPOCH).days // CHUNK_DAYS
+    first = CHUNK_EPOCH + timedelta(days=bucket * CHUNK_DAYS)
+    return first, first + timedelta(days=CHUNK_DAYS - 1)
+
+
+def _chunks(start: date, end: date, covered: set[date]) -> list[tuple[date, date]]:
+    spans = {_chunk(day) for day in coverage.days(start, end) if day not in covered}
+    return [(max(first, start), min(last, end)) for first, last in sorted(spans)]

@@ -355,10 +355,11 @@ function addCircleLayer(layer) {
   bindPopup(layer.id);
 }
 
-function renderLegend(counts) {
+function renderLegend(counts, notes = {}) {
   legend.innerHTML = LAYERS.map(
     (layer) =>
-      `<label class="legend-row"><input type="checkbox" data-layer="${layer.id}"` +
+      `<label class="legend-row"${notes[layer.id] ? ` title="${notes[layer.id]}"` : ""}>` +
+      `<input type="checkbox" data-layer="${layer.id}"` +
       `${hidden.has(layer.id) ? "" : " checked"}>` +
       `<span class="dot" style="background:${layer.color}"></span>${layer.label}` +
       `<span class="count">${counts[layer.id] ?? "–"}</span></label>`
@@ -481,11 +482,15 @@ async function selectHour(hour, tick) {
   map.setPaintProperty(RISK_LAYER.id, "line-color", riskColorExpression(risk.peak));
   map.getSource(RISK_LAYER.id).setData(risk);
 
+  const missing = risk.complete === false ? risk.missing_release_days : [];
   const counts = {
     vessels: vessels.length,
     strandings: strandings.length,
-    risk: risk.features.length,
+    risk: missing.length ? null : risk.features.length,
   };
+  const notes = missing.length
+    ? { risk: `Dérive non calculée pour ${missing.length} jour(s) : ${missing[0]} → ${missing[missing.length - 1]}` }
+    : {};
   for (const layer of CONDITION_LAYERS) {
     const rows = conditionRows(conditions, layer);
     map.getSource(layer.id).setData(toFeatureCollection(rows));
@@ -493,5 +498,5 @@ async function selectHour(hour, tick) {
   }
   map.getSource("vessels").setData(toFeatureCollection(vessels));
   map.getSource("strandings").setData(toFeatureCollection(strandings));
-  renderLegend(counts);
+  renderLegend(counts, notes);
 }

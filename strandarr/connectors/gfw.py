@@ -23,7 +23,7 @@ def iter_positions(
     start: date,
     end: date,
     skip_days: set[date] | None = None,
-) -> Iterator[list[VesselPosition]]:
+) -> Iterator[tuple[date, list[VesselPosition]]]:
     if not settings.gfw_api_token:
         raise RuntimeError("GFW_API_TOKEN is not set")
     skip_days = skip_days or set()
@@ -51,7 +51,7 @@ def iter_positions(
                     len(positions),
                     len(cells),
                 )
-                yield positions
+                yield day, positions
             day += timedelta(days=1)
 
 

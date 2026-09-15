@@ -4,6 +4,7 @@ import time
 from sqlalchemy.exc import InterfaceError, OperationalError
 from sqlalchemy.orm import Session
 
+from strandarr import log
 from strandarr.connectors.http import QuotaExhausted
 from strandarr.models import Job
 from strandarr.repositories import queue
@@ -21,7 +22,7 @@ def run_job(session: Session, job: Job) -> int:
     source = BY_KIND.get(job.kind)
     if source is None:
         raise ValueError(f"unknown job kind: {job.kind}")
-    rows = source.handler(session, job.payload)
+    rows = source.handler(session, job.kind, job.payload)
     session.commit()
     return rows
 
@@ -32,43 +33,41 @@ def run_pending(session: Session) -> int:
         job = queue.claim_next(session)
         if job is None:
             return processed
-        logger.info("job %d %s starting %s", job.id, job.kind, job.payload)
-        started = time.monotonic()
-        try:
-            rows = run_job(session, job)
-        except QuotaExhausted as exc:
-            session.rollback()
-            queue.defer(session, job)
-            logger.warning(
-                "job %d %s hit an API quota (%s), retrying in %ds",
-                job.id,
-                job.kind,
-                exc,
-                QUOTA_PAUSE_SECONDS,
-            )
-            time.sleep(QUOTA_PAUSE_SECONDS)
-            return processed
-        except Exception as exc:
-            session.rollback()
-            retry = queue.retry_or_fail(session, job, str(exc))
-            logger.error(
-                "job %d %s failed (attempt %d/%d), %s: %s",
-                job.id,
-                job.kind,
-                job.attempts,
-                queue.MAX_ATTEMPTS,
-                "queued for retry" if retry else "giving up",
-                exc,
-            )
-        else:
-            queue.mark_done(session, job)
-            logger.info(
-                "job %d %s done: %d rows in %.1fs",
-                job.id,
-                job.kind,
-                rows,
-                time.monotonic() - started,
-            )
+        with log.job(job.id):
+            logger.info("%s starting %s", job.kind, job.payload)
+            started = time.monotonic()
+            try:
+                rows = run_job(session, job)
+            except QuotaExhausted as exc:
+                session.rollback()
+                queue.defer(session, job)
+                logger.warning(
+                    "%s hit an API quota (%s), retrying in %ds",
+                    job.kind,
+                    exc,
+                    QUOTA_PAUSE_SECONDS,
+                )
+                time.sleep(QUOTA_PAUSE_SECONDS)
+                return processed
+            except Exception as exc:
+                session.rollback()
+                retry = queue.retry_or_fail(session, job, str(exc))
+                logger.error(
+                    "%s failed (attempt %d/%d), %s: %s",
+                    job.kind,
+                    job.attempts,
+                    queue.MAX_ATTEMPTS,
+                    "queued for retry" if retry else "giving up",
+                    exc,
+                )
+            else:
+                queue.mark_done(session, job)
+                logger.info(
+                    "%s done: %d rows in %.1fs",
+                    job.kind,
+                    rows,
+                    time.monotonic() - started,
+                )
         processed += 1
 
 

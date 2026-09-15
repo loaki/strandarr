@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
-from strandarr import grid
+from strandarr import grid, sources
 from strandarr.config import settings
 from strandarr.models import CoastalSegment, VesselPosition
 
@@ -86,6 +86,8 @@ MEASUREMENTS = (
 )
 READING_WIDTH = 4 + len(MEASUREMENTS)
 
+OBSERVED_RANKS = tuple(sources.precedence(name) for name in sources.OBSERVED)
+
 Float = NDArray[np.float64]
 Int = NDArray[np.int32]
 
@@ -152,7 +154,9 @@ def build_forcing(batches: Iterable[Sequence[Sequence[Any]]]) -> Forcing:
                 value = values[at]
                 take = ~np.isnan(value) & np.isnan(raw[offset, rows, cols, slots])
                 raw[offset][rows[take], cols[take], slots[take]] = value[take]
-        covered = set(hour.tolist())
+        covered = set[int].intersection(
+            *(set(hour[rank == level].tolist()) for level in OBSERVED_RANKS)
+        )
 
     speed, course, wind_speed, wind_course, sea_level, wave = raw
     current = np.nan_to_num(speed, nan=0.0) / 3.6

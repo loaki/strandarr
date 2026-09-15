@@ -9,7 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import SQLColumnExpression, func, select
 from sqlalchemy.orm import Session as SessionType
 
-from strandarr import sources
+from strandarr import kinds, sources
 from strandarr.analysis import drift
 from strandarr.models import (
     CoastalSegment,
@@ -19,6 +19,7 @@ from strandarr.models import (
     VesselPosition,
 )
 from strandarr.repositories.db import Session
+from strandarr.services import coverage
 
 app = FastAPI(title="strandarr")
 
@@ -135,9 +136,31 @@ def get_vessels(at: Hour, db: Db) -> list[dict[str, Any]]:
     return [{field: getattr(row, field) for field in VESSEL_FIELDS} for row in rows]
 
 
+def _release_days(start: datetime) -> list[date]:
+    return [
+        (start - timedelta(days=offset)).date()
+        for offset in range(drift.MAX_DRIFT_DAYS)
+    ]
+
+
 @app.get("/api/risk")
 def get_risk(at: Hour, db: Db) -> dict[str, Any]:
     start, end = _hour(at)
+
+    needed = _release_days(start)
+    simulated = coverage.covered_days(
+        db, kinds.DRIFT_ARRIVALS, min(needed), max(needed)
+    )
+    missing = sorted(set(needed) - simulated)
+    if missing:
+        return {
+            "type": "FeatureCollection",
+            "features": [],
+            "peak": 0.0,
+            "complete": False,
+            "missing_release_days": [day.isoformat() for day in missing],
+        }
+
     expected = func.sum(DriftArrival.expected_count)
     rows = db.execute(
         select(
@@ -179,7 +202,13 @@ def get_risk(at: Hour, db: Db) -> dict[str, Any]:
         for segment_id, center_lat, center_lon, length_km, path, count, days in rows
     ]
     peak = max((float(row.expected_count) for row in rows), default=0.0)
-    return {"type": "FeatureCollection", "features": features, "peak": peak}
+    return {
+        "type": "FeatureCollection",
+        "features": features,
+        "peak": peak,
+        "complete": True,
+        "missing_release_days": [],
+    }
 
 
 @app.get("/api/strandings")
