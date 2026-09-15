@@ -1,4 +1,3 @@
-import math
 from collections.abc import Iterable, Iterator
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
@@ -146,22 +145,13 @@ def _release_days(start: datetime) -> list[date]:
 @app.get("/api/risk")
 def get_risk(at: Hour, db: Db) -> dict[str, Any]:
     start, end = _hour(at)
-
     needed = _release_days(start)
     simulated = coverage.covered_days(
         db, kinds.DRIFT_ARRIVALS, min(needed), max(needed)
     )
     missing = sorted(set(needed) - simulated)
-    if missing:
-        return {
-            "type": "FeatureCollection",
-            "features": [],
-            "peak": 0.0,
-            "complete": False,
-            "missing_release_days": [day.isoformat() for day in missing],
-        }
 
-    expected = func.sum(DriftArrival.expected_count)
+    index = func.sum(DriftArrival.drift_index)
     rows = db.execute(
         select(
             CoastalSegment.id,
@@ -169,7 +159,7 @@ def get_risk(at: Hour, db: Db) -> dict[str, Any]:
             CoastalSegment.center_lon,
             CoastalSegment.length_km,
             CoastalSegment.path,
-            expected.label("expected_count"),
+            index.label("drift_index"),
             func.count().label("release_days"),
         )
         .join(DriftArrival, DriftArrival.coastal_segment_id == CoastalSegment.id)
@@ -179,9 +169,10 @@ def get_risk(at: Hour, db: Db) -> dict[str, Any]:
             DriftArrival.model_version == drift.MODEL_VERSION,
         )
         .group_by(CoastalSegment.id)
-        .order_by(expected.desc())
+        .order_by(index.desc())
     ).all()
 
+    peak = max((float(row.drift_index) for row in rows), default=0.0)
     features: list[dict[str, Any]] = [
         {
             "type": "Feature",
@@ -194,20 +185,20 @@ def get_risk(at: Hour, db: Db) -> dict[str, Any]:
                 "lat": center_lat,
                 "lon": center_lon,
                 "length_km": length_km,
-                "expected_count": float(count),
-                "probability": 1.0 - math.exp(-float(count)),
+                "drift_index": float(value),
+                "relative_index": 100.0 * float(value) / peak if peak else 0.0,
                 "release_days": days,
             },
         }
-        for segment_id, center_lat, center_lon, length_km, path, count, days in rows
+        for segment_id, center_lat, center_lon, length_km, path, value, days in rows
     ]
-    peak = max((float(row.expected_count) for row in rows), default=0.0)
     return {
         "type": "FeatureCollection",
         "features": features,
         "peak": peak,
-        "complete": True,
-        "missing_release_days": [],
+        "release_days_expected": len(needed),
+        "complete": not missing,
+        "missing_release_days": [day.isoformat() for day in missing],
     }
 
 

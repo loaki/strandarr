@@ -7,11 +7,12 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import numpy as np
-from numpy.typing import NDArray
 
 from strandarr import grid, sources
+from strandarr.analysis import Float
+from strandarr.analysis.coast import Coast
 from strandarr.config import settings
-from strandarr.models import CoastalSegment, VesselPosition
+from strandarr.models import VesselPosition
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +71,6 @@ MAX_PARTICLES = 400_000
 MIN_PARTICLES_PER_SEED = 6
 WEIGHT_FLOOR = 1e-9
 
-COAST_RASTER_DEG = 0.02
 METRES_PER_DEGREE = 111_320.0
 SECONDS_PER_STEP = 3600.0
 
@@ -87,9 +87,6 @@ MEASUREMENTS = (
 READING_WIDTH = 4 + len(MEASUREMENTS)
 
 OBSERVED_RANKS = tuple(sources.precedence(name) for name in sources.OBSERVED)
-
-Float = NDArray[np.float64]
-Int = NDArray[np.int32]
 
 
 @dataclass(frozen=True)
@@ -220,71 +217,6 @@ def _standardise(sea_level: Float) -> Float:
 
 
 @dataclass(frozen=True)
-class Coast:
-    segment_ids: list[int]
-    nearest: Int
-    distance_km: Float
-
-    def lookup(self, lat: Float, lon: Float) -> tuple[Int, Float]:
-        min_lon, min_lat, _, _ = grid.BBOX
-        rows, columns = self.nearest.shape
-        i = np.clip(((lat - min_lat) / COAST_RASTER_DEG).astype(np.int32), 0, rows - 1)
-        j = np.clip(
-            ((lon - min_lon) / COAST_RASTER_DEG).astype(np.int32), 0, columns - 1
-        )
-        return self.nearest[i, j], self.distance_km[i, j]
-
-
-_coast: tuple[tuple[int, ...], Coast] | None = None
-
-
-def build_coast(segments: Sequence[CoastalSegment]) -> Coast:
-    global _coast
-    key = tuple(segment.id for segment in segments)
-    if _coast is not None and _coast[0] == key:
-        return _coast[1]
-
-    min_lon, min_lat, max_lon, max_lat = grid.BBOX
-    rows = int((max_lat - min_lat) / COAST_RASTER_DEG) + 1
-    columns = int((max_lon - min_lon) / COAST_RASTER_DEG) + 1
-    nearest = np.full((rows, columns), -1, dtype=np.int32)
-    distance = np.full((rows, columns), np.inf, dtype=np.float64)
-    lat_axis = min_lat + np.arange(rows, dtype=np.float64) * COAST_RASTER_DEG
-    lon_axis = min_lon + np.arange(columns, dtype=np.float64) * COAST_RASTER_DEG
-
-    for index, segment in enumerate(segments):
-        for lon, lat in segment.path or [[segment.center_lon, segment.center_lat]]:
-            scale = 111.3 * math.cos(math.radians(lat))
-            half_lat = BEACHING_DISTANCE_KM / 110.6
-            half_lon = BEACHING_DISTANCE_KM / max(1.0, scale)
-            i0 = max(0, int((lat - half_lat - min_lat) / COAST_RASTER_DEG))
-            i1 = min(rows, int((lat + half_lat - min_lat) / COAST_RASTER_DEG) + 2)
-            j0 = max(0, int((lon - half_lon - min_lon) / COAST_RASTER_DEG))
-            j1 = min(columns, int((lon + half_lon - min_lon) / COAST_RASTER_DEG) + 2)
-            if i0 >= i1 or j0 >= j1:
-                continue
-            local = np.hypot(
-                (lat_axis[i0:i1] - lat)[:, None] * 110.6,
-                (lon_axis[j0:j1] - lon)[None, :] * scale,
-            )
-            window = distance[i0:i1, j0:j1]
-            closer = local < window
-            window[closer] = local[closer]
-            nearest[i0:i1, j0:j1][closer] = index
-
-    coast = Coast(
-        segment_ids=[segment.id for segment in segments],
-        nearest=nearest,
-        distance_km=distance,
-    )
-    _coast = (key, coast)
-    logger.info(
-        "coast raster: %d segment(s), %dx%d cells", len(segments), rows, columns
-    )
-    return coast
-
-
-@dataclass(frozen=True)
 class Seed:
     hour: int
     lat: float
@@ -328,7 +260,7 @@ def seeds(positions: Sequence[VesselPosition], day: date) -> list[Seed]:
 class Arrival:
     segment_id: int
     hour: int
-    expected_count: float
+    drift_index: float
 
 
 @dataclass(frozen=True)
@@ -466,7 +398,7 @@ def simulate(
             Arrival(
                 segment_id=coast.segment_ids[segment],
                 hour=int(hour),
-                expected_count=float(deposits[segment, hour]),
+                drift_index=float(deposits[segment, hour]),
             )
             for segment, hour in zip(where, hours, strict=True)
         ],

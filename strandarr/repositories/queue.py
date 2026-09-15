@@ -1,5 +1,5 @@
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any, cast
 
 from sqlalchemy import CursorResult, or_, select, update
@@ -21,7 +21,7 @@ def release_running(session: Session) -> None:
         session.execute(
             update(Job)
             .where(Job.status == JobStatus.RUNNING)
-            .values(status=JobStatus.PENDING, started_at=None)
+            .values(status=JobStatus.PENDING, started_at=None, not_before=None)
         ),
     ).rowcount
     session.commit()
@@ -37,10 +37,10 @@ def unfinished_payloads(session: Session, kind: str) -> list[dict[str, Any]]:
     )
 
 
-def defer(session: Session, job: Job) -> None:
+def defer(session: Session, job: Job, until: datetime) -> None:
     job.status = JobStatus.PENDING
     job.attempts = max(0, job.attempts - 1)
-    job.started_at = utc_now()
+    job.not_before = until
     session.commit()
 
 
@@ -56,7 +56,7 @@ def claim_next(session: Session) -> Job | None:
         select(Job)
         .where(
             Job.status == JobStatus.PENDING,
-            or_(Job.started_at.is_(None), Job.started_at < utc_now() - RETRY_DELAY),
+            or_(Job.not_before.is_(None), Job.not_before <= utc_now()),
         )
         .order_by(Job.created_at)
         .limit(1)
@@ -67,6 +67,7 @@ def claim_next(session: Session) -> Job | None:
         return None
     job.status = JobStatus.RUNNING
     job.started_at = utc_now()
+    job.not_before = None
     job.attempts += 1
     session.commit()
     return job
@@ -84,6 +85,7 @@ def retry_or_fail(session: Session, job: Job, error: str) -> bool:
     retry = job.attempts < MAX_ATTEMPTS
     if retry:
         job.status = JobStatus.PENDING
+        job.not_before = utc_now() + RETRY_DELAY
     else:
         job.status = JobStatus.FAILED
         job.finished_at = utc_now()

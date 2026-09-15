@@ -2,6 +2,7 @@ import logging
 import random
 import re
 import time
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -37,10 +38,39 @@ def _throttle(url: str, cost: int) -> None:
 
 
 class QuotaExhausted(RuntimeError):
-    pass
+    def __init__(self, host: str, reason: str, retry_at: datetime) -> None:
+        super().__init__(f"{host}: {reason}")
+        self.retry_at = retry_at
 
 
 _SPENT_QUOTA = re.compile(r"\b(daily|monthly)\b", re.IGNORECASE)
+
+_blocked: dict[str, tuple[datetime, str]] = {}
+
+
+def _midnight(day: date) -> datetime:
+    return datetime.combine(day, datetime.min.time(), tzinfo=UTC)
+
+
+def _spent_until(reason: str, now: datetime) -> datetime | None:
+    spent = _SPENT_QUOTA.search(reason)
+    if spent is None:
+        return None
+    if spent.group(1).lower() == "monthly":
+        return _midnight(
+            (now.date().replace(day=1) + timedelta(days=31)).replace(day=1)
+        )
+    return _midnight(now.date() + timedelta(days=1))
+
+
+def _guard(host: str) -> None:
+    blocked = _blocked.get(host)
+    if blocked is None:
+        return
+    retry_at, reason = blocked
+    if retry_at > datetime.now(UTC):
+        raise QuotaExhausted(host, reason, retry_at)
+    del _blocked[host]
 
 
 def _retry_after(response: httpx.Response) -> float | None:
@@ -66,6 +96,8 @@ def _backoff(attempt: int) -> float:
 def request(
     client: httpx.Client, method: str, url: str, cost: int = 1, **kwargs: Any
 ) -> httpx.Response:
+    host = urlsplit(url).hostname or ""
+    _guard(host)
     for attempt in range(1, MAX_ATTEMPTS + 1):
         last = attempt == MAX_ATTEMPTS
         _throttle(url, cost)
@@ -89,8 +121,14 @@ def request(
                 response.raise_for_status()
                 return response
             reason = _reason(response)
-            if response.status_code == 429 and _SPENT_QUOTA.search(reason):
-                raise QuotaExhausted(f"{urlsplit(url).hostname}: {reason}")
+            spent = (
+                _spent_until(reason, datetime.now(UTC))
+                if response.status_code == 429
+                else None
+            )
+            if spent is not None:
+                _blocked[host] = (spent, reason)
+                raise QuotaExhausted(host, reason, spent)
             delay = _retry_after(response) or _backoff(attempt)
             logger.warning(
                 "%s %s returned %d%s, attempt %d/%d, waiting %.0fs",

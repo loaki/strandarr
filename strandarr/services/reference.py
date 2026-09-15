@@ -1,7 +1,7 @@
 import logging
 from typing import Any, cast
 
-from sqlalchemy import CursorResult, delete
+from sqlalchemy import CursorResult, delete, select
 from sqlalchemy.orm import Session
 
 from strandarr.config import settings
@@ -14,15 +14,24 @@ from strandarr.repositories import store
 logger = logging.getLogger(__name__)
 
 
+def segments(session: Session) -> list[CoastalSegment]:
+    rows = list(
+        session.execute(select(CoastalSegment).order_by(CoastalSegment.id)).scalars()
+    )
+    if not rows:
+        raise RuntimeError(
+            "no coastal segments stored: run `strandarr reference` first"
+        )
+    return rows
+
+
 def build(session: Session) -> dict[str, int]:
     lines = coastline.fetch_lines()
-    segments = coastline.segments(lines)
+    built = coastline.segments(lines)
     written = {
-        "coastal_segments": store.upsert(
-            session, CoastalSegment, segments, overwrite=True
-        )
+        "coastal_segments": store.upsert(session, CoastalSegment, built, overwrite=True)
     }
-    written["stale_segments_removed"] = _prune_segments(session, segments)
+    written["stale_segments_removed"] = _prune_segments(session, built)
     session.commit()
     written["grid_cells"] = _grid_cells(session, coastline.nearest_index(lines))
     return written

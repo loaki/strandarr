@@ -15,7 +15,6 @@ logger = logging.getLogger(__name__)
 
 POLL_SECONDS = 5
 DB_RETRY_SECONDS = 5
-QUOTA_PAUSE_SECONDS = 300
 
 
 def run_job(session: Session, job: Job) -> int:
@@ -40,15 +39,14 @@ def run_pending(session: Session) -> int:
                 rows = run_job(session, job)
             except QuotaExhausted as exc:
                 session.rollback()
-                queue.defer(session, job)
+                queue.defer(session, job, exc.retry_at)
                 logger.warning(
-                    "%s hit an API quota (%s), retrying in %ds",
+                    "%s hit an API quota (%s), deferred until %s",
                     job.kind,
                     exc,
-                    QUOTA_PAUSE_SECONDS,
+                    exc.retry_at.isoformat(timespec="seconds"),
                 )
-                time.sleep(QUOTA_PAUSE_SECONDS)
-                return processed
+                continue
             except Exception as exc:
                 session.rollback()
                 retry = queue.retry_or_fail(session, job, str(exc))

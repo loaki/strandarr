@@ -8,13 +8,12 @@ from sqlalchemy import Integer, case, delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from strandarr import kinds, sources
-from strandarr.analysis import drift
+from strandarr.analysis import coast, drift
 from strandarr.config import settings
 from strandarr.connectors import gbif, gfw, open_meteo, pelagis_histocarto
 from strandarr.geo import Point
 from strandarr.grid import BBOX, cell, grid_points
 from strandarr.models import (
-    CoastalSegment,
     DriftArrival,
     DriftRelease,
     GridCell,
@@ -23,7 +22,7 @@ from strandarr.models import (
     VesselPosition,
 )
 from strandarr.repositories import store
-from strandarr.services import coverage
+from strandarr.services import coverage, reference
 
 logger = logging.getLogger(__name__)
 
@@ -70,8 +69,10 @@ def _ingest_span(
     for rows in open_meteo.iter_archive(product, points, start, end):
         written += store.upsert(session, MarineCondition, rows, overwrite=force)
         counts.update(row.valid_at.date() for row in rows)
+        session.commit()
+    span = set(coverage.days(start, end))
     coverage.record(
-        session, kind, {day: counts[day] for day in coverage.days(start, end)}
+        session, kind, {day: count for day, count in counts.items() if day in span}
     )
     session.commit()
     return written
@@ -156,17 +157,6 @@ strandings_gbif = strandings(gbif.fetch_strandings)
 strandings_histocarto = strandings(pelagis_histocarto.fetch_strandings)
 
 
-def _segments(session: Session) -> list[CoastalSegment]:
-    rows = list(
-        session.execute(select(CoastalSegment).order_by(CoastalSegment.id)).scalars()
-    )
-    if not rows:
-        raise RuntimeError(
-            "no coastal segments stored: run `strandarr reference` before drifting"
-        )
-    return rows
-
-
 def _forcing(session: Session, day: date) -> drift.Forcing:
     start, end = drift.window(day)
     hour = func.floor(
@@ -220,13 +210,13 @@ def drift_arrivals(session: Session, kind: str, payload: dict[str, Any]) -> int:
         )
     if not pending:
         return 0
-    coast = drift.build_coast(_segments(session))
+    raster = coast.build(reference.segments(session), drift.BEACHING_DISTANCE_KM)
 
     total = 0
     for day in pending:
         released_at = datetime.combine(day, time.min, tzinfo=UTC)
         seeds = drift.seeds(_effort(session, day), day)
-        result = drift.simulate(seeds, _forcing(session, day), coast)
+        result = drift.simulate(seeds, _forcing(session, day), raster)
 
         session.execute(
             delete(DriftArrival).where(
@@ -243,7 +233,7 @@ def drift_arrivals(session: Session, kind: str, payload: dict[str, Any]) -> int:
                     model_version=drift.MODEL_VERSION,
                     coastal_segment_id=arrival.segment_id,
                     arrival_at=released_at + timedelta(hours=arrival.hour),
-                    expected_count=arrival.expected_count,
+                    drift_index=arrival.drift_index,
                 )
                 for arrival in result.arrivals
             ],
@@ -260,7 +250,12 @@ def drift_arrivals(session: Session, kind: str, payload: dict[str, Any]) -> int:
             ],
             overwrite=True,
         )
-        coverage.record_day(session, kind, day, len(result.arrivals), result.complete)
+        coverage.record(
+            session,
+            kind,
+            {day: len(result.arrivals)},
+            complete=result.complete,
+        )
         session.commit()
 
         logger.info(

@@ -54,7 +54,7 @@ const POINT_LAYERS = [
 
 const RISK_LAYER = {
   id: "risk",
-  label: "Stranding risk",
+  label: "Relative stranding risk",
   color: "#8e44ad",
   stops: ["#f7e8c8", "#e8a33d", "#c0392b", "#6b1d6b"],
 };
@@ -92,8 +92,8 @@ const FIELD_LABELS = {
   swell_period_s: "Swell period",
   sea_surface_temperature_c: "Sea temperature",
   sea_level_m: "Tide height",
-  expected_count: "Expected strandings",
-  probability: "Chance of a stranding",
+  drift_index: "Drift index (unitless)",
+  relative_index: "Share of the hour's peak",
   release_days: "Contributing release days",
   length_km: "Segment length",
   segment_id: "Segment",
@@ -112,6 +112,7 @@ const UNITS = {
   sea_surface_temperature_c: " °C",
   sea_level_m: " m",
   length_km: " km",
+  relative_index: " / 100",
 };
 
 const DIRECTION_SENSE = {
@@ -210,13 +211,10 @@ const fmtHour = (at) => at.toISOString();
 const fmtDay = (at) => at.toISOString().slice(0, 10);
 const fmtLabel = (at) => at.toUTCString().slice(0, 22) + " UTC";
 
-const PERCENT = new Set(["probability"]);
-
 function fmtValue(key, value) {
   if (value === null || value === undefined || value === "") return "—";
   if (Array.isArray(value)) return value.join(", ");
-  if (PERCENT.has(key)) return (value * 100).toFixed(1) + " %";
-  if (key === "expected_count") return Number(value).toPrecision(3);
+  if (key === "drift_index") return Number(value).toPrecision(3);
   if (key in DIRECTION_SENSE) {
     return `${DIRECTION_SENSE[key]} ${Math.round(value)}°`;
   }
@@ -306,7 +304,7 @@ function addArrowLayer(layer) {
 
 function riskColorExpression(peak) {
   const top = peak > 0 ? peak : 1;
-  const expression = ["interpolate", ["linear"], ["get", "expected_count"]];
+  const expression = ["interpolate", ["linear"], ["get", "drift_index"]];
   for (let i = 0; i < RISK_LAYER.stops.length; i++) {
     const at = (top * i) / (RISK_LAYER.stops.length - 1);
     expression.push(at, RISK_LAYER.stops[i]);
@@ -328,9 +326,9 @@ function addRiskLayer() {
         ["linear"],
         ["zoom"],
         5,
-        ["interpolate", ["linear"], ["get", "probability"], 0, 2.5, 1, 9],
+        ["interpolate", ["linear"], ["get", "relative_index"], 0, 2.5, 100, 9],
         10,
-        ["interpolate", ["linear"], ["get", "probability"], 0, 5, 1, 22],
+        ["interpolate", ["linear"], ["get", "relative_index"], 0, 5, 100, 22],
       ],
       "line-opacity": 0.9,
     },
@@ -482,14 +480,18 @@ async function selectHour(hour, tick) {
   map.setPaintProperty(RISK_LAYER.id, "line-color", riskColorExpression(risk.peak));
   map.getSource(RISK_LAYER.id).setData(risk);
 
-  const missing = risk.complete === false ? risk.missing_release_days : [];
+  const missing = risk.missing_release_days ?? [];
   const counts = {
     vessels: vessels.length,
     strandings: strandings.length,
-    risk: missing.length ? null : risk.features.length,
+    risk: risk.features.length,
   };
   const notes = missing.length
-    ? { risk: `Dérive non calculée pour ${missing.length} jour(s) : ${missing[0]} → ${missing[missing.length - 1]}` }
+    ? {
+        risk:
+          `Partial: ${missing.length} of ${risk.release_days_expected} release ` +
+          `days not simulated yet (${missing[0]} → ${missing[missing.length - 1]})`,
+      }
     : {};
   for (const layer of CONDITION_LAYERS) {
     const rows = conditionRows(conditions, layer);

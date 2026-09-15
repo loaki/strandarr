@@ -25,26 +25,17 @@ def covered_days(session: Session, kind: str, start: date, end: date) -> set[dat
     return set(session.execute(statement).scalars())
 
 
-def _write(session: Session, rows: list[IngestCoverage]) -> None:
-    store.upsert(session, IngestCoverage, rows, overwrite=True)
-
-
-def record(session: Session, kind: str, rows: Mapping[date, int]) -> None:
-    _write(
+def record(
+    session: Session, kind: str, rows: Mapping[date, int], complete: bool = True
+) -> None:
+    store.upsert(
         session,
+        IngestCoverage,
         [
-            IngestCoverage(kind=kind, day=day, row_count=count, complete=count > 0)
+            IngestCoverage(kind=kind, day=day, row_count=count, complete=complete)
             for day, count in rows.items()
         ],
-    )
-
-
-def record_day(
-    session: Session, kind: str, day: date, row_count: int, complete: bool
-) -> None:
-    _write(
-        session,
-        [IngestCoverage(kind=kind, day=day, row_count=row_count, complete=complete)],
+        overwrite=True,
     )
 
 

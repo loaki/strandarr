@@ -43,4 +43,4 @@ class DriftArrival(Base):
     arrival_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )
-    expected_count: Mapped[float] = mapped_column(Float, nullable=False)
+    drift_index: Mapped[float] = mapped_column(Float, nullable=False)
