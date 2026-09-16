@@ -8,8 +8,8 @@ from typing import Any
 import websockets
 from websockets.asyncio.client import connect
 
+from strandarr.analysis.geo import BBox
 from strandarr.connectors.http import backoff
-from strandarr.geo import BBox
 
 logger = logging.getLogger(__name__)
 

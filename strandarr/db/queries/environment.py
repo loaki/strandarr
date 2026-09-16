@@ -5,10 +5,10 @@ from typing import Any
 from sqlalchemy import Integer, case, func, select
 from sqlalchemy.orm import Session
 
-from strandarr import sources
-from strandarr.analysis import conditions, drift
+from strandarr.analysis import drift, forecast
+from strandarr.analysis.timeframe import midnight
+from strandarr.connectors import sources
 from strandarr.models import MarineCondition
-from strandarr.timeframe import midnight
 
 BATCH_ROWS = 100_000
 
@@ -37,7 +37,7 @@ def forcing(session: Session, day: date) -> Iterator[Sequence[Sequence[Any]]]:
 
 
 def sea_state(session: Session, day: date) -> Sequence[Any]:
-    seen = midnight(day - timedelta(days=conditions.LAG_DAYS))
+    seen = midnight(day - timedelta(days=forecast.LAG_DAYS))
     wave = MarineCondition.wave_height_m
     heading = func.radians(MarineCondition.wave_direction_deg + 180.0)
     return session.execute(

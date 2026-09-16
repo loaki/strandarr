@@ -2,8 +2,8 @@ import logging
 
 import httpx
 
+from strandarr.analysis.geo import Point
 from strandarr.connectors.http import request_object
-from strandarr.geo import Point
 
 logger = logging.getLogger(__name__)
 

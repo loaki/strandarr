@@ -7,9 +7,9 @@ import numpy as np
 from sqlalchemy.orm import Session
 
 from strandarr.analysis import coast
+from strandarr.analysis.coast import SegmentIndex
+from strandarr.analysis.timeframe import day_of
 from strandarr.db.queries import observation
-from strandarr.segments import SegmentIndex
-from strandarr.timeframe import day_of
 
 SNAP_RADIUS_KM = 15.0
 

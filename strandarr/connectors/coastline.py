@@ -5,9 +5,15 @@ from typing import Any
 
 import httpx
 
+from strandarr.analysis.geo import (
+    GRID,
+    NearestIndex,
+    Point,
+    bearing_deg,
+    densify,
+    distance_km,
+)
 from strandarr.connectors.http import request_object
-from strandarr.geo import NearestIndex, Point, bearing_deg, densify, distance_km
-from strandarr.grid import GRID
 from strandarr.models import CoastalSegment
 
 logger = logging.getLogger(__name__)

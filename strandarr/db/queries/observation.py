@@ -5,9 +5,9 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import InstrumentedAttribute, Session
 
-from strandarr import sources
+from strandarr.analysis.timeframe import DayRange
+from strandarr.connectors import sources
 from strandarr.models import MarineCondition, Stranding, VesselPosition
-from strandarr.timeframe import DayRange
 
 Window = tuple[datetime, datetime]
 

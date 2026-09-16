@@ -5,14 +5,13 @@ import signal
 from datetime import UTC, datetime
 from typing import Any
 
-from strandarr import sources
+from strandarr.analysis.geo import GRID, BBox
 from strandarr.config import settings
+from strandarr.connectors import sources
 from strandarr.connectors.aisstream import stream
 from strandarr.db.engine import unit_of_work
 from strandarr.db.queries.observation import fishing_fleet
 from strandarr.db.upsert import upsert
-from strandarr.geo import BBox
-from strandarr.grid import GRID
 from strandarr.models import VesselPosition
 
 logger = logging.getLogger(__name__)

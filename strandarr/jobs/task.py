@@ -6,8 +6,8 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from strandarr.analysis.timeframe import DayRange
 from strandarr.db.queries import coverage
-from strandarr.timeframe import DayRange
 
 logger = logging.getLogger(__name__)
 

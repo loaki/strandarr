@@ -1,12 +1,14 @@
 from collections.abc import Mapping
-from datetime import date
+from datetime import date, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from strandarr.analysis.drift import MAX_DRIFT_DAYS
+from strandarr.analysis.timeframe import DayRange
 from strandarr.db.upsert import upsert
+from strandarr.jobs import kinds
 from strandarr.models import IngestCoverage
-from strandarr.timeframe import DayRange
 
 
 def covered(session: Session, kind: str, days: DayRange) -> set[date]:
@@ -37,3 +39,29 @@ def record(
         ],
         overwrite=True,
     )
+
+
+def release_window(day: date) -> DayRange:
+    return DayRange(day - timedelta(days=MAX_DRIFT_DAYS - 1), day)
+
+
+def missing_releases(session: Session, day: date) -> tuple[DayRange, list[date]]:
+    needed = release_window(day)
+    return needed, sorted(set(needed) - covered(session, kinds.DRIFT_ARRIVALS, needed))
+
+
+def eligible_days(session: Session, days: DayRange, minimum: int) -> set[date]:
+    simulated = covered(
+        session,
+        kinds.DRIFT_ARRIVALS,
+        DayRange(days.start - timedelta(days=MAX_DRIFT_DAYS - 1), days.end),
+    )
+    return {
+        day
+        for day in days
+        if sum(
+            day - timedelta(days=offset) in simulated
+            for offset in range(MAX_DRIFT_DAYS)
+        )
+        >= minimum
+    }

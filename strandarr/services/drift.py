@@ -2,13 +2,13 @@ import logging
 from dataclasses import dataclass
 from datetime import date, timedelta
 
-from strandarr import kinds
 from strandarr.analysis import coast, drift
+from strandarr.analysis.timeframe import midnight
 from strandarr.db.queries import coverage, environment, observation, reference
 from strandarr.db.upsert import replace, upsert
+from strandarr.jobs import kinds
 from strandarr.jobs.task import Context, Payload, Task
 from strandarr.models import DriftDaily, DriftRelease
-from strandarr.timeframe import midnight
 
 logger = logging.getLogger(__name__)
 

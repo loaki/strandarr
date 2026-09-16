@@ -4,11 +4,10 @@ from typing import Any, cast
 from sqlalchemy import CursorResult, delete, or_, select
 from sqlalchemy.orm import Session
 
+from strandarr.analysis.coast import SegmentIndex
+from strandarr.analysis.geo import GRID, Point
 from strandarr.config import settings
-from strandarr.geo import Point
-from strandarr.grid import GRID
 from strandarr.models import CoastalSegment, GridCell
-from strandarr.segments import SegmentIndex
 
 logger = logging.getLogger(__name__)
 

@@ -8,13 +8,13 @@ from sqlalchemy.orm import Session
 from strandarr.analysis import climatology as climatology_model
 from strandarr.analysis import drift
 from strandarr.analysis import forecast as forecast_model
+from strandarr.analysis.timeframe import DayRange
 from strandarr.models import (
     CoastalSegment,
     DriftDaily,
     SegmentClimatology,
     SegmentForecast,
 )
-from strandarr.timeframe import DayRange
 
 SEGMENT_COLUMNS = (
     CoastalSegment.id,

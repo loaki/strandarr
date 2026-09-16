@@ -6,9 +6,9 @@ from sqlalchemy.orm import Session
 
 from strandarr.analysis import skill
 from strandarr.analysis.drift import MAX_DRIFT_DAYS
+from strandarr.analysis.timeframe import DayRange
 from strandarr.services.dataset import TOP_K, Dataset, load
 from strandarr.services.observations import SNAP_RADIUS_KM, Observation
-from strandarr.timeframe import DayRange
 
 __all__ = ["SNAP_RADIUS_KM", "TOP_K", "Report", "Validation", "evaluate"]
 

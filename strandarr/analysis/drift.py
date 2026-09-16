@@ -8,11 +8,11 @@ from typing import Any
 
 import numpy as np
 
-from strandarr import sources
 from strandarr.analysis import Float
 from strandarr.analysis.coast import Coast
-from strandarr.grid import GRID
-from strandarr.timeframe import midnight
+from strandarr.analysis.geo import GRID
+from strandarr.analysis.timeframe import midnight
+from strandarr.connectors import sources
 
 logger = logging.getLogger(__name__)
 

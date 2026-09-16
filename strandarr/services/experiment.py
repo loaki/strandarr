@@ -7,8 +7,8 @@ from sqlalchemy.orm import Session
 
 from strandarr.analysis import Float, skill
 from strandarr.analysis.drift import MAX_DRIFT_DAYS
+from strandarr.analysis.timeframe import DayRange
 from strandarr.services.dataset import TOP_K, Dataset, load
-from strandarr.timeframe import DayRange
 
 MAX_WINDOW_DAYS = 5
 

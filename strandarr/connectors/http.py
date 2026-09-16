@@ -8,7 +8,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from strandarr.timeframe import midnight
+from strandarr.analysis.timeframe import midnight
 
 logger = logging.getLogger(__name__)
 

@@ -7,12 +7,12 @@ import numpy as np
 from sqlalchemy.orm import Session
 
 from strandarr.analysis import Float, Mask, climatology
+from strandarr.analysis.coast import SegmentIndex
 from strandarr.analysis.drift import MAX_DRIFT_DAYS
-from strandarr.db.queries import prediction, reference
-from strandarr.segments import SegmentIndex
-from strandarr.services import coverage, observations
+from strandarr.analysis.timeframe import DayRange
+from strandarr.db.queries import coverage, prediction, reference
+from strandarr.services import observations
 from strandarr.services.observations import Observation
-from strandarr.timeframe import DayRange
 
 logger = logging.getLogger(__name__)
 

@@ -2,12 +2,11 @@ import logging
 
 from sqlalchemy.orm import Session
 
+from strandarr.analysis.geo import GRID, NearestIndex, Point
 from strandarr.config import settings
 from strandarr.connectors import bathymetry, coastline
 from strandarr.db.queries.reference import prune_segments
 from strandarr.db.upsert import upsert
-from strandarr.geo import NearestIndex, Point
-from strandarr.grid import GRID
 from strandarr.models import CoastalSegment, GridCell
 
 logger = logging.getLogger(__name__)

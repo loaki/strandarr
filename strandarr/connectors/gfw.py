@@ -5,11 +5,11 @@ from typing import Any
 
 import httpx
 
+from strandarr.analysis.geo import BBox
+from strandarr.analysis.timeframe import DayRange
 from strandarr.config import settings
 from strandarr.connectors.http import request_json
-from strandarr.geo import BBox
 from strandarr.models import VesselPosition
-from strandarr.timeframe import DayRange
 
 logger = logging.getLogger(__name__)
 
