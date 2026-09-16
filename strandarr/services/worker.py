@@ -39,7 +39,7 @@ def run_pending(session: Session) -> int:
                 rows = run_job(session, job)
             except QuotaExhausted as exc:
                 session.rollback()
-                queue.defer(session, job, exc.retry_at)
+                queue.defer(session, job, exc.retry_at, str(exc))
                 logger.warning(
                     "%s hit an API quota (%s), deferred until %s",
                     job.kind,

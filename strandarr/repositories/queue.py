@@ -37,10 +37,11 @@ def unfinished_payloads(session: Session, kind: str) -> list[dict[str, Any]]:
     )
 
 
-def defer(session: Session, job: Job, until: datetime) -> None:
+def defer(session: Session, job: Job, until: datetime, reason: str) -> None:
     job.status = JobStatus.PENDING
     job.attempts = max(0, job.attempts - 1)
     job.not_before = until
+    job.error = reason[:2000]
     session.commit()
 
 

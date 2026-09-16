@@ -2,6 +2,7 @@ import logging
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from math import ceil
 from typing import Any
 
 import httpx
@@ -19,6 +20,7 @@ MARINE_URL = "https://marine-api.open-meteo.com/v1/marine"
 
 POINTS_PER_REQUEST = 200
 DAYS_PER_REQUEST = 14
+VARIABLES_PER_REQUEST = 10
 TIMEOUT_SECONDS = 180
 
 WIND_VARIABLES = {
@@ -80,13 +82,22 @@ def iter_archive(
             "end_date": chunk_end.isoformat(),
         }
         label = f"{chunk_start}..{chunk_end}"
-        yield from _iter_batches(product, points, window, label)
+        days = (chunk_end - chunk_start).days + 1
+        yield from _iter_batches(product, points, window, label, days)
 
 
 def iter_forecast(
     product: Product, points: list[tuple[float, float]], hours: int
 ) -> Iterator[list[MarineCondition]]:
-    yield from _iter_batches(product, points, {"forecast_hours": hours}, f"+{hours}h")
+    yield from _iter_batches(
+        product, points, {"forecast_hours": hours}, f"+{hours}h", ceil(hours / 24)
+    )
+
+
+def weight(points: int, days: int, variables: int) -> int:
+    return (
+        points * ceil(days / DAYS_PER_REQUEST) * ceil(variables / VARIABLES_PER_REQUEST)
+    )
 
 
 def date_chunks(start: date, end: date) -> Iterator[tuple[date, date]]:
@@ -102,6 +113,7 @@ def _iter_batches(
     points: list[tuple[float, float]],
     window: dict[str, Any],
     label: str,
+    days: int,
 ) -> Iterator[list[MarineCondition]]:
     with httpx.Client(timeout=TIMEOUT_SECONDS) as client:
         for offset in range(0, len(points), POINTS_PER_REQUEST):
@@ -111,7 +123,7 @@ def _iter_batches(
                 client,
                 "GET",
                 product.url,
-                cost=len(batch),
+                cost=weight(len(batch), days, len(product.variables)),
                 params={
                     "latitude": ",".join(str(lat) for lat, _ in batch),
                     "longitude": ",".join(str(lon) for _, lon in batch),

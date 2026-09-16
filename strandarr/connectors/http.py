@@ -15,10 +15,16 @@ MAX_ATTEMPTS = 8
 BACKOFF_SECONDS = 3
 MAX_BACKOFF_SECONDS = 180
 
-UNITS_PER_MINUTE = {
-    "archive-api.open-meteo.com": 600,
-    "marine-api.open-meteo.com": 600,
-    "gateway.api.globalfishingwatch.org": 30,
+MINUTE = 60.0
+HOUR = 3600.0
+
+OPEN_METEO_BUDGETS = ((MINUTE, 600), (HOUR, 5000))
+
+BUDGETS: dict[str, tuple[tuple[float, int], ...]] = {
+    "archive-api.open-meteo.com": OPEN_METEO_BUDGETS,
+    "marine-api.open-meteo.com": OPEN_METEO_BUDGETS,
+    "api.open-meteo.com": OPEN_METEO_BUDGETS,
+    "gateway.api.globalfishingwatch.org": ((MINUTE, 30),),
 }
 
 _sent_at: dict[str, float] = {}
@@ -26,10 +32,10 @@ _sent_at: dict[str, float] = {}
 
 def _throttle(url: str, cost: int) -> None:
     host = urlsplit(url).hostname or ""
-    limit = UNITS_PER_MINUTE.get(host)
-    if limit is None:
+    budgets = BUDGETS.get(host)
+    if budgets is None:
         return
-    interval = 60.0 * cost / limit
+    interval = max(window * cost / units for window, units in budgets)
     wait = interval - (time.monotonic() - _sent_at.get(host, 0.0))
     if wait > 0:
         logger.debug("%s: spacing %d unit(s), waiting %.1fs", host, cost, wait)
@@ -43,7 +49,7 @@ class QuotaExhausted(RuntimeError):
         self.retry_at = retry_at
 
 
-_SPENT_QUOTA = re.compile(r"\b(daily|monthly)\b", re.IGNORECASE)
+_SPENT_QUOTA = re.compile(r"\b(hourly|daily|monthly)\b", re.IGNORECASE)
 
 _blocked: dict[str, tuple[datetime, str]] = {}
 
@@ -56,7 +62,10 @@ def _spent_until(reason: str, now: datetime) -> datetime | None:
     spent = _SPENT_QUOTA.search(reason)
     if spent is None:
         return None
-    if spent.group(1).lower() == "monthly":
+    window = spent.group(1).lower()
+    if window == "hourly":
+        return now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    if window == "monthly":
         return _midnight(
             (now.date().replace(day=1) + timedelta(days=31)).replace(day=1)
         )
