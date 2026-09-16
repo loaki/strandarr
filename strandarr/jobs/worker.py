@@ -6,10 +6,10 @@ from sqlalchemy.orm import Session
 
 from strandarr import log
 from strandarr.connectors.http import QuotaExhausted
+from strandarr.db.engine import unit_of_work
+from strandarr.jobs import queue, schedule
+from strandarr.jobs.task import Payload
 from strandarr.models import Job
-from strandarr.repositories import queue
-from strandarr.repositories.db import Session as SessionFactory
-from strandarr.services.schedule import BY_KIND
 
 logger = logging.getLogger(__name__)
 
@@ -18,10 +18,8 @@ DB_RETRY_SECONDS = 5
 
 
 def run_job(session: Session, job: Job) -> int:
-    source = BY_KIND.get(job.kind)
-    if source is None:
-        raise ValueError(f"unknown job kind: {job.kind}")
-    rows = source.handler(session, job.kind, job.payload)
+    task = schedule.get(job.kind)
+    rows = task.run(task.context(session), Payload.parse(job.payload))
     session.commit()
     return rows
 
@@ -74,7 +72,7 @@ def run_forever() -> None:
     reconnected = True
     while True:
         try:
-            with SessionFactory() as session:
+            with unit_of_work() as session:
                 if reconnected:
                     queue.release_running(session)
                     reconnected = False

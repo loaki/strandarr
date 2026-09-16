@@ -3,16 +3,16 @@ import math
 import warnings
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import numpy as np
 
-from strandarr import grid, sources
+from strandarr import sources
 from strandarr.analysis import Float
 from strandarr.analysis.coast import Coast
-from strandarr.config import settings
-from strandarr.models import VesselPosition
+from strandarr.grid import GRID
+from strandarr.timeframe import midnight
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +97,7 @@ class Forcing:
     fields: Float
 
     def sample(self, step: int, lat: Float, lon: Float) -> Float:
-        span = settings.grid_step_deg
+        span = GRID.step_deg
         row = (lat - self.lats[0]) / span
         column = (lon - self.lons[0]) / span
         row0 = np.clip(np.floor(row), 0, len(self.lats) - 2).astype(np.int32)
@@ -112,7 +112,7 @@ class Forcing:
 
 
 def build_forcing(batches: Iterable[Sequence[Sequence[Any]]]) -> Forcing:
-    lat_axis, lon_axis = grid.axes()
+    lat_axis, lon_axis = GRID.axes()
     lats = np.asarray(lat_axis, dtype=np.float64)
     lons = np.asarray(lon_axis, dtype=np.float64)
     raw = np.full((len(MEASUREMENTS), DRIFT_HOURS, len(lats), len(lons)), np.nan)
@@ -124,7 +124,7 @@ def build_forcing(batches: Iterable[Sequence[Sequence[Any]]]) -> Forcing:
 
     covered: set[int] = set()
     if columns[0]:
-        span = settings.grid_step_deg
+        span = GRID.step_deg
         hour = np.asarray(columns[0], dtype=np.int64)
         rank = np.asarray(columns[1], dtype=np.int64)
         i = np.rint((np.asarray(columns[2], dtype=np.float64) - lats[0]) / span)
@@ -230,14 +230,14 @@ def gear_weight(gear_type: str | None) -> float:
     return GEAR_WEIGHTS.get(gear_type.strip().lower(), DEFAULT_GEAR_WEIGHT)
 
 
-def seeds(positions: Sequence[VesselPosition], day: date) -> list[Seed]:
-    midnight = datetime.combine(day, datetime.min.time(), tzinfo=UTC)
+def seeds(positions: Sequence[Any], day: date) -> list[Seed]:
+    start = midnight(day)
     grouped: dict[tuple[int, float, float], float] = {}
     for position in positions:
         effort = position.effort_hours
         if not effort or effort <= 0:
             continue
-        hour = int((position.recorded_at - midnight).total_seconds() // 3600)
+        hour = int((position.recorded_at - start).total_seconds() // 3600)
         if not 0 <= hour < 24:
             continue
         key = (hour, round(position.lat, 3), round(position.lon, 3))
@@ -291,7 +291,7 @@ def simulate(
         MIN_PARTICLES_PER_SEED, min(PARTICLES_PER_SEED, MAX_PARTICLES // len(seed_list))
     )
     count = len(seed_list) * per_seed
-    jitter = settings.grid_step_deg / 2
+    jitter = GRID.step_deg / 2
 
     birth = np.repeat([seed.hour for seed in seed_list], per_seed)
     lat = np.repeat([seed.lat for seed in seed_list], per_seed) + generator.uniform(
@@ -311,7 +311,7 @@ def simulate(
     moor_segment = np.full(count, -1, dtype=np.int32)
     deposits = np.zeros((len(coast.segment_ids), steps))
 
-    min_lon, min_lat, max_lon, max_lat = grid.BBOX
+    min_lon, min_lat, max_lon, max_lat = GRID.bbox.corners()
     decay = 0.5 ** (1.0 / (FLOAT_HALF_LIFE_DAYS * 24.0))
     walk = math.sqrt(2 * HORIZONTAL_DIFFUSIVITY_M2S * SECONDS_PER_STEP)
     last_birth = int(birth.max())
@@ -410,5 +410,5 @@ def simulate(
 
 
 def window(day: date) -> tuple[datetime, datetime]:
-    start = datetime.combine(day, datetime.min.time(), tzinfo=UTC)
+    start = midnight(day)
     return start, start + timedelta(days=MAX_DRIFT_DAYS)

@@ -1,13 +1,15 @@
 import asyncio
 import json
 import logging
-import random
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
 
 import websockets
 from websockets.asyncio.client import connect
+
+from strandarr.connectors.http import backoff
+from strandarr.geo import BBox
 
 logger = logging.getLogger(__name__)
 
@@ -21,10 +23,8 @@ BACKOFF_SECONDS = 2
 MAX_BACKOFF_SECONDS = 120
 
 
-def subscription(
-    api_key: str, bbox: tuple[float, float, float, float]
-) -> dict[str, Any]:
-    min_lon, min_lat, max_lon, max_lat = bbox
+def subscription(api_key: str, bbox: BBox) -> dict[str, Any]:
+    min_lon, min_lat, max_lon, max_lat = bbox.corners()
     return {
         "APIKey": api_key,
         "BoundingBoxes": [[[max_lat, min_lon], [min_lat, max_lon]]],
@@ -60,9 +60,7 @@ def parse(message: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-async def stream(
-    api_key: str, bbox: tuple[float, float, float, float]
-) -> AsyncIterator[dict[str, Any]]:
+async def stream(api_key: str, bbox: BBox) -> AsyncIterator[dict[str, Any]]:
     attempt = 0
     while True:
         try:
@@ -94,8 +92,7 @@ async def stream(
             RuntimeError,
         ) as exc:
             attempt += 1
-            delay = min(BACKOFF_SECONDS * 2 ** (attempt - 1), MAX_BACKOFF_SECONDS)
-            delay *= 0.5 + random.random() / 2
+            delay = backoff(attempt, BACKOFF_SECONDS, MAX_BACKOFF_SECONDS)
             logger.warning(
                 "aisstream: disconnected (%s), reconnecting in %.0fs (attempt %d)",
                 exc,

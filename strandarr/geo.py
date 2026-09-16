@@ -1,10 +1,44 @@
 import math
 from collections.abc import Iterable, Iterator
+from dataclasses import dataclass
 from itertools import pairwise
+from typing import Any
 
 EARTH_RADIUS_KM = 6371.0088
 
 Point = tuple[float, float]
+
+
+@dataclass(frozen=True)
+class BBox:
+    min_lon: float
+    min_lat: float
+    max_lon: float
+    max_lat: float
+
+    def contains(self, lat: float, lon: float, margin_deg: float = 0.0) -> bool:
+        return (
+            self.min_lat - margin_deg <= lat <= self.max_lat + margin_deg
+            and self.min_lon - margin_deg <= lon <= self.max_lon + margin_deg
+        )
+
+    def corners(self) -> tuple[float, float, float, float]:
+        return self.min_lon, self.min_lat, self.max_lon, self.max_lat
+
+    def ring(self) -> list[list[float]]:
+        return [
+            [self.min_lon, self.min_lat],
+            [self.max_lon, self.min_lat],
+            [self.max_lon, self.max_lat],
+            [self.min_lon, self.max_lat],
+            [self.min_lon, self.min_lat],
+        ]
+
+    def wkt(self) -> str:
+        return f"POLYGON(({','.join(f'{lon} {lat}' for lon, lat in self.ring())}))"
+
+    def geojson(self) -> dict[str, Any]:
+        return {"type": "Polygon", "coordinates": [self.ring()]}
 
 
 def distance_km(first: Point, second: Point) -> float:

@@ -1,13 +1,12 @@
 import logging
 import math
-from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
 
-from strandarr import grid
 from strandarr.analysis import Float, Int
-from strandarr.models import CoastalSegment
+from strandarr.grid import GRID
+from strandarr.segments import SegmentIndex
 
 logger = logging.getLogger(__name__)
 
@@ -18,12 +17,12 @@ KM_PER_LON_DEG = 111.3
 
 @dataclass(frozen=True)
 class Coast:
-    segment_ids: list[int]
+    segment_ids: tuple[int, ...]
     nearest: Int
     distance_km: Float
 
     def lookup(self, lat: Float, lon: Float) -> tuple[Int, Float]:
-        min_lon, min_lat, _, _ = grid.BBOX
+        min_lon, min_lat, _, _ = GRID.bbox.corners()
         rows, columns = self.nearest.shape
         i = np.clip(np.rint((lat - min_lat) / RASTER_DEG), 0, rows - 1).astype(np.int32)
         j = np.clip(np.rint((lon - min_lon) / RASTER_DEG), 0, columns - 1).astype(
@@ -32,16 +31,16 @@ class Coast:
         return self.nearest[i, j], self.distance_km[i, j]
 
 
-_cache: dict[float, tuple[tuple[int, ...], Coast]] = {}
+_cache: dict[tuple[tuple[int, ...], float], Coast] = {}
 
 
-def build(segments: Sequence[CoastalSegment], radius_km: float) -> Coast:
-    key = tuple(segment.id for segment in segments)
-    cached = _cache.get(radius_km)
-    if cached is not None and cached[0] == key:
-        return cached[1]
+def build(index: SegmentIndex, radius_km: float) -> Coast:
+    key = (index.ids, radius_km)
+    cached = _cache.get(key)
+    if cached is not None:
+        return cached
 
-    min_lon, min_lat, max_lon, max_lat = grid.BBOX
+    min_lon, min_lat, max_lon, max_lat = GRID.bbox.corners()
     rows = int((max_lat - min_lat) / RASTER_DEG) + 1
     columns = int((max_lon - min_lon) / RASTER_DEG) + 1
     nearest = np.full((rows, columns), -1, dtype=np.int32)
@@ -49,8 +48,8 @@ def build(segments: Sequence[CoastalSegment], radius_km: float) -> Coast:
     lat_axis = min_lat + np.arange(rows, dtype=np.float64) * RASTER_DEG
     lon_axis = min_lon + np.arange(columns, dtype=np.float64) * RASTER_DEG
 
-    for index, segment in enumerate(segments):
-        for lon, lat in segment.path or [[segment.center_lon, segment.center_lat]]:
+    for position in range(len(index)):
+        for lon, lat in index.geometry(position):
             scale = KM_PER_LON_DEG * math.cos(math.radians(lat))
             half_lat = radius_km / KM_PER_LAT_DEG
             half_lon = radius_km / max(1.0, scale)
@@ -67,17 +66,13 @@ def build(segments: Sequence[CoastalSegment], radius_km: float) -> Coast:
             window = distance[i0:i1, j0:j1]
             closer = local < window
             window[closer] = local[closer]
-            nearest[i0:i1, j0:j1][closer] = index
+            nearest[i0:i1, j0:j1][closer] = position
 
-    coast = Coast(
-        segment_ids=[segment.id for segment in segments],
-        nearest=nearest,
-        distance_km=distance,
-    )
-    _cache[radius_km] = (key, coast)
+    coast = Coast(segment_ids=index.ids, nearest=nearest, distance_km=distance)
+    _cache[key] = coast
     logger.info(
         "coast raster: %d segment(s), %dx%d cells, %.0f km reach",
-        len(segments),
+        len(index),
         rows,
         columns,
         radius_km,

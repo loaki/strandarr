@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import ClassVar
 
 from sqlalchemy import Boolean, DateTime, Index, String
 from sqlalchemy.orm import Mapped, mapped_column
@@ -10,6 +11,10 @@ class DriftRelease(Base):
     __tablename__ = "drift_release"
     __table_args__ = (
         Index("ix_drift_release_dedup", "release_at", "model_version", unique=True),
+    )
+    __conflict__: ClassVar[tuple[str, ...]] = (
+        "release_at",
+        "model_version",
     )
 
     release_at: Mapped[datetime] = mapped_column(

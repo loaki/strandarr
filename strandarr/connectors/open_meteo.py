@@ -1,7 +1,7 @@
 import logging
 from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime
 from math import ceil
 from typing import Any
 
@@ -10,7 +10,9 @@ import httpx
 from strandarr import sources
 from strandarr.config import settings
 from strandarr.connectors.http import request_json
+from strandarr.geo import Point
 from strandarr.models import MarineCondition
+from strandarr.timeframe import DayRange
 
 logger = logging.getLogger(__name__)
 
@@ -74,20 +76,21 @@ FORECASTS = (WEATHER_FORECAST, MARINE_FORECAST)
 
 
 def iter_archive(
-    product: Product, points: list[tuple[float, float]], start: date, end: date
+    product: Product, points: list[Point], days: DayRange
 ) -> Iterator[list[MarineCondition]]:
-    for chunk_start, chunk_end in date_chunks(start, end):
-        window = {
-            "start_date": chunk_start.isoformat(),
-            "end_date": chunk_end.isoformat(),
-        }
-        label = f"{chunk_start}..{chunk_end}"
-        days = (chunk_end - chunk_start).days + 1
-        yield from _iter_batches(product, points, window, label, days)
+    for chunk in days.chunks(DAYS_PER_REQUEST):
+        start, end = chunk.isoformat()
+        yield from _iter_batches(
+            product,
+            points,
+            {"start_date": start, "end_date": end},
+            f"{start}..{end}",
+            len(chunk),
+        )
 
 
 def iter_forecast(
-    product: Product, points: list[tuple[float, float]], hours: int
+    product: Product, points: list[Point], hours: int
 ) -> Iterator[list[MarineCondition]]:
     yield from _iter_batches(
         product, points, {"forecast_hours": hours}, f"+{hours}h", ceil(hours / 24)
@@ -100,17 +103,9 @@ def weight(points: int, days: int, variables: int) -> int:
     )
 
 
-def date_chunks(start: date, end: date) -> Iterator[tuple[date, date]]:
-    cursor = start
-    while cursor <= end:
-        chunk_end = min(end, cursor + timedelta(days=DAYS_PER_REQUEST - 1))
-        yield cursor, chunk_end
-        cursor = chunk_end + timedelta(days=1)
-
-
 def _iter_batches(
     product: Product,
-    points: list[tuple[float, float]],
+    points: list[Point],
     window: dict[str, Any],
     label: str,
     days: int,
@@ -147,7 +142,7 @@ def _iter_batches(
 
 def parse(
     product: Product,
-    batch: list[tuple[float, float]],
+    batch: list[Point],
     payload: dict[str, Any] | list[Any],
     issued_at: datetime,
 ) -> list[MarineCondition]:

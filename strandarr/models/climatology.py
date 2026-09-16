@@ -1,3 +1,5 @@
+from typing import ClassVar
+
 from sqlalchemy import Float, ForeignKey, Index, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -15,6 +17,11 @@ class SegmentClimatology(Base):
             unique=True,
         ),
         Index("ix_segment_climatology_day", "day_of_year"),
+    )
+    __conflict__: ClassVar[tuple[str, ...]] = (
+        "coastal_segment_id",
+        "day_of_year",
+        "model_version",
     )
 
     coastal_segment_id: Mapped[int] = mapped_column(

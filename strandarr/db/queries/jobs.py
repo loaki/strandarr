@@ -1,5 +1,5 @@
-import logging
-from datetime import datetime, timedelta
+from collections.abc import Sequence
+from datetime import datetime
 from typing import Any, cast
 
 from sqlalchemy import CursorResult, or_, select, update
@@ -8,14 +8,10 @@ from sqlalchemy.orm import Session
 from strandarr.models import Job, JobStatus
 from strandarr.models.base import utc_now
 
-logger = logging.getLogger(__name__)
-
-MAX_ATTEMPTS = 3
-RETRY_DELAY = timedelta(minutes=1)
 UNFINISHED = (JobStatus.PENDING, JobStatus.RUNNING)
 
 
-def release_running(session: Session) -> None:
+def release_running(session: Session) -> int:
     released = cast(
         "CursorResult[Any]",
         session.execute(
@@ -25,11 +21,10 @@ def release_running(session: Session) -> None:
         ),
     ).rowcount
     session.commit()
-    if released:
-        logger.warning("released %d job(s) left running by a previous worker", released)
+    return int(released)
 
 
-def unfinished_payloads(session: Session, kind: str) -> list[dict[str, Any]]:
+def unfinished_payloads(session: Session, kind: str) -> Sequence[dict[str, Any]]:
     return list(
         session.execute(
             select(Job.payload).where(Job.kind == kind, Job.status.in_(UNFINISHED))
@@ -37,23 +32,15 @@ def unfinished_payloads(session: Session, kind: str) -> list[dict[str, Any]]:
     )
 
 
-def defer(session: Session, job: Job, until: datetime, reason: str) -> None:
-    job.status = JobStatus.PENDING
-    job.attempts = max(0, job.attempts - 1)
-    job.not_before = until
-    job.error = reason[:2000]
-    session.commit()
-
-
-def enqueue(session: Session, kind: str, payload: dict[str, Any]) -> Job:
+def insert(session: Session, kind: str, payload: dict[str, Any]) -> Job:
     job = Job(kind=kind, payload=payload)
     session.add(job)
     session.flush()
     return job
 
 
-def claim_next(session: Session) -> Job | None:
-    stmt = (
+def take_pending(session: Session) -> Job | None:
+    job = session.execute(
         select(Job)
         .where(
             Job.status == JobStatus.PENDING,
@@ -62,8 +49,7 @@ def claim_next(session: Session) -> Job | None:
         .order_by(Job.created_at)
         .limit(1)
         .with_for_update(skip_locked=True)
-    )
-    job = session.execute(stmt).scalar_one_or_none()
+    ).scalar_one_or_none()
     if job is None:
         return None
     job.status = JobStatus.RUNNING
@@ -74,21 +60,16 @@ def claim_next(session: Session) -> Job | None:
     return job
 
 
-def mark_done(session: Session, job: Job) -> None:
-    job.status = JobStatus.DONE
-    job.finished_at = utc_now()
-    job.error = None
-    session.commit()
-
-
-def retry_or_fail(session: Session, job: Job, error: str) -> bool:
-    job.error = error[:2000]
-    retry = job.attempts < MAX_ATTEMPTS
-    if retry:
-        job.status = JobStatus.PENDING
-        job.not_before = utc_now() + RETRY_DELAY
-    else:
-        job.status = JobStatus.FAILED
+def finish(
+    session: Session,
+    job: Job,
+    status: JobStatus,
+    error: str | None = None,
+    not_before: datetime | None = None,
+) -> None:
+    job.status = status
+    job.error = error[:2000] if error else None
+    job.not_before = not_before
+    if status in (JobStatus.DONE, JobStatus.FAILED):
         job.finished_at = utc_now()
     session.commit()
-    return retry

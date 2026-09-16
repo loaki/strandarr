@@ -1,13 +1,15 @@
 import logging
 from collections.abc import Iterator
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
 
 from strandarr import sources, species
 from strandarr.connectors.http import request_json
+from strandarr.geo import BBox
 from strandarr.models import Stranding
+from strandarr.timeframe import DayRange
 
 logger = logging.getLogger(__name__)
 
@@ -18,14 +20,6 @@ TIMEOUT_SECONDS = 120
 STRANDING_DATASET = "f6baa711-9c3f-4820-97ce-83fe50744678"
 
 SOURCE = sources.GBIF
-
-
-def _geometry(bbox: tuple[float, float, float, float]) -> str:
-    min_lon, min_lat, max_lon, max_lat = bbox
-    return (
-        f"POLYGON(({min_lon} {min_lat},{max_lon} {min_lat},{max_lon} {max_lat},"
-        f"{min_lon} {max_lat},{min_lon} {min_lat}))"
-    )
 
 
 def _iter_occurrences(params: dict[str, Any], label: str) -> Iterator[dict[str, Any]]:
@@ -50,13 +44,12 @@ def _iter_occurrences(params: dict[str, Any], label: str) -> Iterator[dict[str, 
                 logger.info("gbif %s: %d records so far", label, offset)
 
 
-def fetch_strandings(
-    bbox: tuple[float, float, float, float], start: date, end: date
-) -> list[Stranding]:
+def fetch_strandings(bbox: BBox, days: DayRange) -> list[Stranding]:
+    start, end = days.isoformat()
     params = {
         "datasetKey": STRANDING_DATASET,
-        "geometry": _geometry(bbox),
-        "eventDate": f"{start.isoformat()},{end.isoformat()}",
+        "geometry": bbox.wkt(),
+        "eventDate": f"{start},{end}",
     }
     strandings = [
         stranding

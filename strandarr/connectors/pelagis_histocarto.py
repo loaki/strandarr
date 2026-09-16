@@ -1,14 +1,16 @@
 import hashlib
 import logging
 import re
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
 
 from strandarr import sources, species
 from strandarr.connectors.http import request_text
+from strandarr.geo import BBox
 from strandarr.models import Stranding
+from strandarr.timeframe import DayRange
 
 logger = logging.getLogger(__name__)
 
@@ -30,17 +32,16 @@ COMMUNE_UNCERTAINTY_M = 5000.0
 DAY_UNCERTAINTY_HOURS = 12.0
 
 
-def fetch_strandings(
-    bbox: tuple[float, float, float, float], start: date, end: date
-) -> list[Stranding]:
+def fetch_strandings(bbox: BBox, days: DayRange) -> list[Stranding]:
+    start, end = days.isoformat()
     with httpx.Client(timeout=TIMEOUT_SECONDS) as client:
         raw = request_text(
             client,
             "GET",
             BASE_URL,
             params={
-                "date_inf": start.isoformat(),
-                "date_sup": end.isoformat(),
+                "date_inf": start,
+                "date_sup": end,
                 "nb_mam_inf": 1,
                 "nb_mam_sup": 100000,
                 "ordre1": "",
@@ -58,8 +59,7 @@ def fetch_strandings(
     return strandings
 
 
-def parse(raw: str, bbox: tuple[float, float, float, float]) -> list[Stranding]:
-    min_lon, min_lat, max_lon, max_lat = bbox
+def parse(raw: str, bbox: BBox) -> list[Stranding]:
     seen: dict[tuple[Any, ...], int] = {}
     strandings = []
     for row in raw.split("\n")[1:]:
@@ -70,7 +70,7 @@ def parse(raw: str, bbox: tuple[float, float, float, float]) -> list[Stranding]:
             lon, lat = float(fields[0]), float(fields[1])
         except ValueError:
             continue
-        if not (min_lon <= lon <= max_lon and min_lat <= lat <= max_lat):
+        if not bbox.contains(lat, lon):
             continue
         for line in fields[3].split("<br>"):
             match = EVENT_LINE.match(line)

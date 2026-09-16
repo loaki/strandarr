@@ -1,55 +1,37 @@
-from collections.abc import Iterator, Mapping
 from datetime import date, timedelta
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from strandarr.models import IngestCoverage
-from strandarr.repositories import store
+from strandarr import kinds
+from strandarr.analysis.drift import MAX_DRIFT_DAYS
+from strandarr.db.queries import coverage
+from strandarr.timeframe import DayRange
 
 
-def days(start: date, end: date) -> Iterator[date]:
-    day = start
-    while day <= end:
-        yield day
-        day += timedelta(days=1)
+def release_window(day: date) -> DayRange:
+    return DayRange(day - timedelta(days=MAX_DRIFT_DAYS - 1), day)
 
 
-def covered_days(session: Session, kind: str, start: date, end: date) -> set[date]:
-    statement = select(IngestCoverage.day).where(
-        IngestCoverage.kind == kind,
-        IngestCoverage.complete.is_(True),
-        IngestCoverage.day >= start,
-        IngestCoverage.day <= end,
+def simulated_releases(session: Session, days: DayRange) -> set[date]:
+    return coverage.covered(session, kinds.DRIFT_ARRIVALS, days)
+
+
+def missing_releases(session: Session, day: date) -> tuple[DayRange, list[date]]:
+    needed = release_window(day)
+    simulated = simulated_releases(session, needed)
+    return needed, sorted(set(needed) - simulated)
+
+
+def eligible_days(session: Session, days: DayRange, minimum: int) -> set[date]:
+    simulated = simulated_releases(
+        session, DayRange(days.start - timedelta(days=MAX_DRIFT_DAYS - 1), days.end)
     )
-    return set(session.execute(statement).scalars())
-
-
-def record(
-    session: Session, kind: str, rows: Mapping[date, int], complete: bool = True
-) -> None:
-    store.upsert(
-        session,
-        IngestCoverage,
-        [
-            IngestCoverage(kind=kind, day=day, row_count=count, complete=complete)
-            for day, count in rows.items()
-        ],
-        overwrite=True,
-    )
-
-
-def missing_ranges(
-    start: date, end: date, covered: set[date]
-) -> list[tuple[date, date]]:
-    ranges: list[tuple[date, date]] = []
-    day = start
-    while day <= end:
-        if day in covered:
-            day += timedelta(days=1)
-            continue
-        run_start = day
-        while day <= end and day not in covered:
-            day += timedelta(days=1)
-        ranges.append((run_start, day - timedelta(days=1)))
-    return ranges
+    return {
+        day
+        for day in days
+        if sum(
+            day - timedelta(days=offset) in simulated
+            for offset in range(MAX_DRIFT_DAYS)
+        )
+        >= minimum
+    }

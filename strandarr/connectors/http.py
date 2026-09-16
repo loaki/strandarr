@@ -2,11 +2,13 @@ import logging
 import random
 import re
 import time
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
+
+from strandarr.timeframe import midnight
 
 logger = logging.getLogger(__name__)
 
@@ -27,35 +29,20 @@ BUDGETS: dict[str, tuple[tuple[float, int], ...]] = {
     "gateway.api.globalfishingwatch.org": ((MINUTE, 30),),
 }
 
-_sent_at: dict[str, float] = {}
+_SPENT_QUOTA = re.compile(r"\b(hourly|daily|monthly)\b", re.IGNORECASE)
 
 
-def _throttle(url: str, cost: int) -> None:
-    host = urlsplit(url).hostname or ""
-    budgets = BUDGETS.get(host)
-    if budgets is None:
-        return
-    interval = max(window * cost / units for window, units in budgets)
-    wait = interval - (time.monotonic() - _sent_at.get(host, 0.0))
-    if wait > 0:
-        logger.debug("%s: spacing %d unit(s), waiting %.1fs", host, cost, wait)
-        time.sleep(wait)
-    _sent_at[host] = time.monotonic()
+def backoff(
+    attempt: int, base: float = BACKOFF_SECONDS, cap: float = MAX_BACKOFF_SECONDS
+) -> float:
+    delay: float = min(base * 2 ** (attempt - 1), cap)
+    return delay * (0.5 + random.random() / 2)
 
 
 class QuotaExhausted(RuntimeError):
     def __init__(self, host: str, reason: str, retry_at: datetime) -> None:
         super().__init__(f"{host}: {reason}")
         self.retry_at = retry_at
-
-
-_SPENT_QUOTA = re.compile(r"\b(hourly|daily|monthly)\b", re.IGNORECASE)
-
-_blocked: dict[str, tuple[datetime, str]] = {}
-
-
-def _midnight(day: date) -> datetime:
-    return datetime.combine(day, datetime.min.time(), tzinfo=UTC)
 
 
 def _spent_until(reason: str, now: datetime) -> datetime | None:
@@ -66,20 +53,42 @@ def _spent_until(reason: str, now: datetime) -> datetime | None:
     if window == "hourly":
         return now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
     if window == "monthly":
-        return _midnight(
-            (now.date().replace(day=1) + timedelta(days=31)).replace(day=1)
-        )
-    return _midnight(now.date() + timedelta(days=1))
+        return midnight((now.date().replace(day=1) + timedelta(days=31)).replace(day=1))
+    return midnight(now.date() + timedelta(days=1))
 
 
-def _guard(host: str) -> None:
-    blocked = _blocked.get(host)
-    if blocked is None:
-        return
-    retry_at, reason = blocked
-    if retry_at > datetime.now(UTC):
-        raise QuotaExhausted(host, reason, retry_at)
-    del _blocked[host]
+class Throttle:
+    def __init__(self, budgets: dict[str, tuple[tuple[float, int], ...]]) -> None:
+        self.budgets = budgets
+        self.sent_at: dict[str, float] = {}
+        self.blocked: dict[str, tuple[datetime, str]] = {}
+
+    def guard(self, host: str) -> None:
+        blocked = self.blocked.get(host)
+        if blocked is None:
+            return
+        retry_at, reason = blocked
+        if retry_at > datetime.now(UTC):
+            raise QuotaExhausted(host, reason, retry_at)
+        del self.blocked[host]
+
+    def block(self, host: str, reason: str, until: datetime) -> QuotaExhausted:
+        self.blocked[host] = (until, reason)
+        return QuotaExhausted(host, reason, until)
+
+    def wait(self, host: str, cost: int) -> None:
+        budgets = self.budgets.get(host)
+        if budgets is None:
+            return
+        interval = max(window * cost / units for window, units in budgets)
+        delay = interval - (time.monotonic() - self.sent_at.get(host, 0.0))
+        if delay > 0:
+            logger.debug("%s: spacing %d unit(s), waiting %.1fs", host, cost, delay)
+            time.sleep(delay)
+        self.sent_at[host] = time.monotonic()
+
+
+throttle = Throttle(BUDGETS)
 
 
 def _retry_after(response: httpx.Response) -> float | None:
@@ -97,25 +106,20 @@ def _reason(response: httpx.Response) -> str:
     return str(body.get("reason", "")) if isinstance(body, dict) else ""
 
 
-def _backoff(attempt: int) -> float:
-    delay: float = min(BACKOFF_SECONDS * 2 ** (attempt - 1), MAX_BACKOFF_SECONDS)
-    return delay * (0.5 + random.random() / 2)
-
-
 def request(
     client: httpx.Client, method: str, url: str, cost: int = 1, **kwargs: Any
 ) -> httpx.Response:
     host = urlsplit(url).hostname or ""
-    _guard(host)
+    throttle.guard(host)
     for attempt in range(1, MAX_ATTEMPTS + 1):
         last = attempt == MAX_ATTEMPTS
-        _throttle(url, cost)
+        throttle.wait(host, cost)
         try:
             response = client.request(method, url, **kwargs)
         except httpx.TransportError as exc:
             if last:
                 raise
-            delay = _backoff(attempt)
+            delay = backoff(attempt)
             logger.warning(
                 "%s %s failed (%s), attempt %d/%d, waiting %.0fs",
                 method,
@@ -136,9 +140,8 @@ def request(
                 else None
             )
             if spent is not None:
-                _blocked[host] = (spent, reason)
-                raise QuotaExhausted(host, reason, spent)
-            delay = _retry_after(response) or _backoff(attempt)
+                raise throttle.block(host, reason, spent)
+            delay = _retry_after(response) or backoff(attempt)
             logger.warning(
                 "%s %s returned %d%s, attempt %d/%d, waiting %.0fs",
                 method,
@@ -164,3 +167,12 @@ def request_json(
 
 def request_text(client: httpx.Client, method: str, url: str, **kwargs: Any) -> str:
     return request(client, method, url, **kwargs).text
+
+
+def request_object(
+    client: httpx.Client, method: str, url: str, label: str, **kwargs: Any
+) -> dict[str, Any]:
+    payload = request_json(client, method, url, **kwargs)
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"{label}: expected an object, got {type(payload).__name__}")
+    return payload

@@ -7,7 +7,9 @@ import httpx
 
 from strandarr.config import settings
 from strandarr.connectors.http import request_json
+from strandarr.geo import BBox
 from strandarr.models import VesselPosition
+from strandarr.timeframe import DayRange
 
 logger = logging.getLogger(__name__)
 
@@ -19,21 +21,19 @@ TIMEOUT_SECONDS = 300
 def iter_positions(
     dataset: str,
     source: str,
-    bbox: tuple[float, float, float, float],
-    start: date,
-    end: date,
-    skip_days: set[date] | None = None,
+    bbox: BBox,
+    days: DayRange,
+    skip: set[date] | None = None,
 ) -> Iterator[tuple[date, list[VesselPosition]]]:
     if not settings.gfw_api_token:
         raise RuntimeError("GFW_API_TOKEN is not set")
-    skip_days = skip_days or set()
+    skipped = skip or set()
     with httpx.Client(
         headers={"Authorization": f"Bearer {settings.gfw_api_token}"},
         timeout=TIMEOUT_SECONDS,
     ) as client:
-        day = start
-        while day <= end:
-            if day not in skip_days:
+        for day in days:
+            if day not in skipped:
                 payload = request_json(
                     client,
                     "POST",
@@ -52,7 +52,6 @@ def iter_positions(
                     len(cells),
                 )
                 yield day, positions
-            day += timedelta(days=1)
 
 
 def collapse_cells(positions: list[VesselPosition]) -> list[VesselPosition]:
@@ -81,24 +80,13 @@ def _params(dataset: str, day: date) -> dict[str, Any]:
     }
 
 
-def _body(bbox: tuple[float, float, float, float]) -> dict[str, Any]:
-    min_lon, min_lat, max_lon, max_lat = bbox
-    geometry = {
-        "type": "Polygon",
-        "coordinates": [
-            [
-                [min_lon, min_lat],
-                [max_lon, min_lat],
-                [max_lon, max_lat],
-                [min_lon, max_lat],
-                [min_lon, min_lat],
-            ]
-        ],
-    }
+def _body(bbox: BBox) -> dict[str, Any]:
     return {
         "geojson": {
             "type": "FeatureCollection",
-            "features": [{"type": "Feature", "properties": {}, "geometry": geometry}],
+            "features": [
+                {"type": "Feature", "properties": {}, "geometry": bbox.geojson()}
+            ],
         }
     }
 

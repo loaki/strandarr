@@ -48,11 +48,7 @@ all-checks: lint format-check typing  ## run all checks (lint + format + typing)
 .PHONY: db-revision
 db-revision: ## autogenerate an alembic migration, usage: make db-revision MSG='describe change'
 	@test -n "$(MSG)" || { echo >&2 "usage: make db-revision MSG='describe change'"; exit 1; }
-	@rev=$$(ls alembic/versions/*.py 2>/dev/null \
-		| sed -nE 's#.*/[0-9]{8}_([0-9]{4})_.*#\1#p' | sort -n \
-		| awk -v day="$$(date +%Y%m%d)" 'END { printf "%s_%04d", day, $$1 + 1 }'); \
-	echo >&2 Generating alembic revision $$rev...; \
-	uv run alembic revision --autogenerate --rev-id "$$rev" -m "$(MSG)"
+	@uv run alembic revision --autogenerate -m "$(MSG)"
 
 .PHONY: db-upgrade
 db-upgrade: ## apply alembic migrations
@@ -61,3 +57,7 @@ db-upgrade: ## apply alembic migrations
 .PHONY: db-current
 db-current: ## show current alembic revision
 	@uv run alembic current
+
+.PHONY: db-check
+db-check: ## fail if the models drifted from the migrations
+	@uv run alembic check

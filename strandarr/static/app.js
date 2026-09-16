@@ -52,18 +52,24 @@ const POINT_LAYERS = [
   { id: "strandings", label: "Strandings", color: "#e63946", radius: 7 },
 ];
 
+const zoomWidth = (near, far) => ["interpolate", ["linear"], ["zoom"], 5, near, 10, far];
+
 const RISK_LAYER = {
   id: "risk",
   label: "Relative stranding risk",
   color: "#8e44ad",
   stops: ["#f7e8c8", "#e8a33d", "#c0392b", "#6b1d6b"],
-};
-
-const CLIMATOLOGY_LAYER = {
-  id: "climatology",
-  label: "Seasonal stranding chance",
-  color: "#1b7a5a",
-  stops: ["#e8f3ec", "#7fc5a3", "#2e8b62", "#0d4a30"],
+  property: "drift_index",
+  opacity: 0.9,
+  width: [
+    "interpolate",
+    ["linear"],
+    ["zoom"],
+    5,
+    ["interpolate", ["linear"], ["get", "relative_index"], 0, 2.5, 100, 9],
+    10,
+    ["interpolate", ["linear"], ["get", "relative_index"], 0, 5, 100, 22],
+  ],
 };
 
 const FORECAST_LAYER = {
@@ -71,7 +77,22 @@ const FORECAST_LAYER = {
   label: "Stranding forecast",
   color: "#b8342a",
   stops: ["#fdf0d5", "#f3b263", "#d1495b", "#6a1b2a"],
+  property: "probability",
+  opacity: 0.9,
+  width: zoomWidth(3.5, 14),
 };
+
+const CLIMATOLOGY_LAYER = {
+  id: "climatology",
+  label: "Seasonal stranding chance",
+  color: "#1b7a5a",
+  stops: ["#e8f3ec", "#7fc5a3", "#2e8b62", "#0d4a30"],
+  property: "probability",
+  opacity: 0.85,
+  width: zoomWidth(3, 12),
+};
+
+const SEGMENT_LAYERS = [RISK_LAYER, FORECAST_LAYER, CLIMATOLOGY_LAYER];
 
 const LAYERS = [
   FORECAST_LAYER,
@@ -151,17 +172,84 @@ const DIRECTION_SENSE = {
   swell_direction_deg: "toward",
 };
 
+const PERCENT = new Set(["probability"]);
+const PRECISE = new Set(["drift_index", "expected_per_day"]);
+
 function lerpColor(a, b, t) {
   const from = [1, 3, 5].map((i) => parseInt(a.slice(i, i + 2), 16));
   const to = [1, 3, 5].map((i) => parseInt(b.slice(i, i + 2), 16));
-  const mix = from.map((v, i) => Math.round(v + (to[i] - v) * t));
-  return `rgb(${mix.join(",")})`;
+  return `rgb(${from.map((v, i) => Math.round(v + (to[i] - v) * t)).join(",")})`;
 }
 
 function rampColor(stops, t) {
   const scaled = Math.max(0, Math.min(1, t)) * (stops.length - 1);
   const i = Math.min(stops.length - 2, Math.floor(scaled));
   return lerpColor(stops[i], stops[i + 1], scaled - i);
+}
+
+function floorHour(iso) {
+  const at = new Date(iso);
+  at.setUTCMinutes(0, 0, 0);
+  return at;
+}
+
+const fmtHour = (at) => at.toISOString();
+const fmtDay = (at) => at.toISOString().slice(0, 10);
+const fmtLabel = (at) => at.toUTCString().slice(0, 22) + " UTC";
+
+function fmtValue(key, value) {
+  if (value === null || value === undefined || value === "") return "—";
+  if (Array.isArray(value)) return value.join(", ");
+  if (PERCENT.has(key)) return (value * 100).toFixed(1) + " %";
+  if (PRECISE.has(key)) return Number(value).toPrecision(3);
+  if (key in DIRECTION_SENSE) return `${DIRECTION_SENSE[key]} ${Math.round(value)}°`;
+  if (typeof value === "number") {
+    return Math.round(value * 100) / 100 + (UNITS[key] || "");
+  }
+  return String(value);
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function popupHtml(layerId, props) {
+  const title = LAYERS.find((layer) => layer.id === layerId).label;
+  const rows = Object.entries(props)
+    .filter(([, value]) => value !== null && value !== undefined && value !== "")
+    .map(
+      ([key, value]) =>
+        `<tr><th>${escapeHtml(FIELD_LABELS[key] || key)}</th>` +
+        `<td>${escapeHtml(fmtValue(key, value))}</td></tr>`
+    )
+    .join("");
+  return `<div class="popup"><h4>${title}</h4><table>${rows}</table></div>`;
+}
+
+function toFeatureCollection(rows) {
+  return {
+    type: "FeatureCollection",
+    features: rows.map((row) => ({
+      type: "Feature",
+      geometry: { type: "Point", coordinates: [row.lon, row.lat] },
+      properties: row,
+    })),
+  };
+}
+
+function conditionRows(rows, layer) {
+  return rows
+    .filter((row) => row[layer.speed] !== null && row[layer.direction] !== null)
+    .map((row) => {
+      const picked = { lat: row.lat, lon: row.lon, sources: row.sources };
+      for (const field of layer.fields) picked[field] = row[field];
+      return picked;
+    });
 }
 
 function arrowImage(color, thick) {
@@ -195,8 +283,10 @@ function arrowImage(color, thick) {
 function registerArrows(map) {
   for (const layer of CONDITION_LAYERS) {
     for (let i = 0; i < RAMP_STEPS; i++) {
-      const color = rampColor(layer.stops, i / (RAMP_STEPS - 1));
-      map.addImage(`${layer.id}-${i}`, arrowImage(color, layer.thick));
+      map.addImage(
+        `${layer.id}-${i}`,
+        arrowImage(rampColor(layer.stops, i / (RAMP_STEPS - 1)), layer.thick)
+      );
     }
   }
 }
@@ -209,75 +299,13 @@ function iconImageExpression(layer) {
   return expression;
 }
 
-function toFeatureCollection(rows) {
-  return {
-    type: "FeatureCollection",
-    features: rows.map((row) => ({
-      type: "Feature",
-      geometry: { type: "Point", coordinates: [row.lon, row.lat] },
-      properties: row,
-    })),
-  };
-}
-
-function conditionRows(rows, layer) {
-  return rows
-    .filter((row) => row[layer.speed] !== null && row[layer.direction] !== null)
-    .map((row) => {
-      const picked = { lat: row.lat, lon: row.lon, sources: row.sources };
-      for (const field of layer.fields) picked[field] = row[field];
-      return picked;
-    });
-}
-
-function floorHour(iso) {
-  const at = new Date(iso);
-  at.setUTCMinutes(0, 0, 0);
-  return at;
-}
-
-const fmtHour = (at) => at.toISOString();
-const fmtDay = (at) => at.toISOString().slice(0, 10);
-const fmtLabel = (at) => at.toUTCString().slice(0, 22) + " UTC";
-
-const PERCENT = new Set(["probability"]);
-
-function fmtValue(key, value) {
-  if (value === null || value === undefined || value === "") return "—";
-  if (Array.isArray(value)) return value.join(", ");
-  if (PERCENT.has(key)) return (value * 100).toFixed(1) + " %";
-  if (key === "drift_index" || key === "expected_per_day") {
-    return Number(value).toPrecision(3);
+function rampExpression(layer, peak) {
+  const top = peak > 0 ? peak : 1;
+  const expression = ["interpolate", ["linear"], ["get", layer.property]];
+  for (let i = 0; i < layer.stops.length; i++) {
+    expression.push((top * i) / (layer.stops.length - 1), layer.stops[i]);
   }
-  if (key in DIRECTION_SENSE) {
-    return `${DIRECTION_SENSE[key]} ${Math.round(value)}°`;
-  }
-  if (typeof value === "number") {
-    return Math.round(value * 100) / 100 + (UNITS[key] || "");
-  }
-  return String(value);
-}
-
-function escapeHtml(value) {
-  return String(value)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
-
-function popupHtml(layerId, props) {
-  const title = LAYERS.find((layer) => layer.id === layerId).label;
-  const rows = Object.entries(props)
-    .filter(([, value]) => value !== null && value !== undefined && value !== "")
-    .map(
-      ([key, value]) =>
-        `<tr><th>${escapeHtml(FIELD_LABELS[key] || key)}</th>` +
-        `<td>${escapeHtml(fmtValue(key, value))}</td></tr>`
-    )
-    .join("");
-  return `<div class="popup"><h4>${title}</h4><table>${rows}</table></div>`;
+  return expression;
 }
 
 const map = new maplibregl.Map({
@@ -308,12 +336,15 @@ function bindPopup(id) {
   map.on("mouseleave", id, () => (map.getCanvas().style.cursor = ""));
 }
 
-function addArrowLayer(layer) {
+function addLayer(layer, spec) {
   map.addSource(layer.id, { type: "geojson", data: EMPTY });
-  map.addLayer({
-    id: layer.id,
+  map.addLayer({ id: layer.id, source: layer.id, ...spec });
+  bindPopup(layer.id);
+}
+
+function addArrowLayer(layer) {
+  addLayer(layer, {
     type: "symbol",
-    source: layer.id,
     layout: {
       "icon-image": iconImageExpression(layer),
       "icon-rotate": layer.from
@@ -333,101 +364,23 @@ function addArrowLayer(layer) {
       ],
     },
   });
-  bindPopup(layer.id);
 }
 
-function riskColorExpression(peak) {
-  const top = peak > 0 ? peak : 1;
-  const expression = ["interpolate", ["linear"], ["get", "drift_index"]];
-  for (let i = 0; i < RISK_LAYER.stops.length; i++) {
-    const at = (top * i) / (RISK_LAYER.stops.length - 1);
-    expression.push(at, RISK_LAYER.stops[i]);
-  }
-  return expression;
-}
-
-function climatologyColorExpression(peak) {
-  const top = peak > 0 ? peak : 1;
-  const expression = ["interpolate", ["linear"], ["get", "probability"]];
-  for (let i = 0; i < CLIMATOLOGY_LAYER.stops.length; i++) {
-    const at = (top * i) / (CLIMATOLOGY_LAYER.stops.length - 1);
-    expression.push(at, CLIMATOLOGY_LAYER.stops[i]);
-  }
-  return expression;
-}
-
-function addClimatologyLayer() {
-  map.addSource(CLIMATOLOGY_LAYER.id, { type: "geojson", data: EMPTY });
-  map.addLayer({
-    id: CLIMATOLOGY_LAYER.id,
+function addSegmentLayer(layer) {
+  addLayer(layer, {
     type: "line",
-    source: CLIMATOLOGY_LAYER.id,
     layout: { "line-cap": "round", "line-join": "round" },
     paint: {
-      "line-color": climatologyColorExpression(1),
-      "line-width": ["interpolate", ["linear"], ["zoom"], 5, 3, 10, 12],
-      "line-opacity": 0.85,
+      "line-color": rampExpression(layer, 1),
+      "line-width": layer.width,
+      "line-opacity": layer.opacity,
     },
   });
-  bindPopup(CLIMATOLOGY_LAYER.id);
-}
-
-function forecastColorExpression(peak) {
-  const top = peak > 0 ? peak : 1;
-  const expression = ["interpolate", ["linear"], ["get", "probability"]];
-  for (let i = 0; i < FORECAST_LAYER.stops.length; i++) {
-    const at = (top * i) / (FORECAST_LAYER.stops.length - 1);
-    expression.push(at, FORECAST_LAYER.stops[i]);
-  }
-  return expression;
-}
-
-function addForecastLayer() {
-  map.addSource(FORECAST_LAYER.id, { type: "geojson", data: EMPTY });
-  map.addLayer({
-    id: FORECAST_LAYER.id,
-    type: "line",
-    source: FORECAST_LAYER.id,
-    layout: { "line-cap": "round", "line-join": "round" },
-    paint: {
-      "line-color": forecastColorExpression(1),
-      "line-width": ["interpolate", ["linear"], ["zoom"], 5, 3.5, 10, 14],
-      "line-opacity": 0.9,
-    },
-  });
-  bindPopup(FORECAST_LAYER.id);
-}
-
-function addRiskLayer() {
-  map.addSource(RISK_LAYER.id, { type: "geojson", data: EMPTY });
-  map.addLayer({
-    id: RISK_LAYER.id,
-    type: "line",
-    source: RISK_LAYER.id,
-    layout: { "line-cap": "round", "line-join": "round" },
-    paint: {
-      "line-color": riskColorExpression(1),
-      "line-width": [
-        "interpolate",
-        ["linear"],
-        ["zoom"],
-        5,
-        ["interpolate", ["linear"], ["get", "relative_index"], 0, 2.5, 100, 9],
-        10,
-        ["interpolate", ["linear"], ["get", "relative_index"], 0, 5, 100, 22],
-      ],
-      "line-opacity": 0.9,
-    },
-  });
-  bindPopup(RISK_LAYER.id);
 }
 
 function addCircleLayer(layer) {
-  map.addSource(layer.id, { type: "geojson", data: EMPTY });
-  map.addLayer({
-    id: layer.id,
+  addLayer(layer, {
     type: "circle",
-    source: layer.id,
     paint: {
       "circle-radius": layer.radius,
       "circle-color": layer.color,
@@ -436,7 +389,6 @@ function addCircleLayer(layer) {
       "circle-opacity": 0.85,
     },
   });
-  bindPopup(layer.id);
 }
 
 function renderLegend(counts, notes = {}) {
@@ -458,22 +410,31 @@ function renderLegend(counts, notes = {}) {
   });
 }
 
-map.on("load", async () => {
-  registerArrows(map);
-  addRiskLayer();
-  addForecastLayer();
-  addClimatologyLayer();
-  CONDITION_LAYERS.forEach(addArrowLayer);
-  POINT_LAYERS.forEach(addCircleLayer);
-  renderLegend({});
+const fetchJson = (url) => fetch(url).then((response) => response.json());
 
-  const range = await fetch("/api/range").then((response) => response.json());
-  if (!range.min || !range.max) {
-    label.textContent = "No data ingested yet";
-    return;
-  }
-  buildTimeline(floorHour(range.min), floorHour(range.max));
-});
+async function snapshot(hour) {
+  const at = encodeURIComponent(fmtHour(hour));
+  const [conditions, vessels, strandings, risk, forecast, climatology] =
+    await Promise.all([
+      fetchJson(`/api/conditions?at=${at}`),
+      fetchJson(`/api/vessels?at=${at}`),
+      fetchJson(`/api/strandings?day=${fmtDay(hour)}`),
+      fetchJson(`/api/risk?at=${at}`),
+      fetchJson(`/api/forecast?at=${at}`),
+      fetchJson(`/api/climatology?at=${at}`),
+    ]);
+  return { conditions, vessels, strandings, risk, forecast, climatology };
+}
+
+function riskNotes(risk) {
+  const missing = risk.missing_release_days ?? [];
+  if (!missing.length) return {};
+  return {
+    risk:
+      `Partial: ${missing.length} of ${risk.release_days_expected} release ` +
+      `days not simulated yet (${missing[0]} → ${missing[missing.length - 1]})`,
+  };
+}
 
 function toggleDayExpanded(dayEl) {
   const willExpand = !dayEl.classList.contains("expanded");
@@ -524,11 +485,10 @@ function buildTimeline(start, end) {
   jump.max = fmtDay(hours[hours.length - 1]);
   jump.addEventListener("change", () => {
     const target = hours.find((hour) => fmtDay(hour) === jump.value);
-    if (target) {
-      const tick = track.querySelector(`[data-hour="${fmtHour(target)}"]`);
-      selectHour(target, tick);
-      tick.scrollIntoView({ inline: "center", block: "nearest" });
-    }
+    if (!target) return;
+    const tick = track.querySelector(`[data-hour="${fmtHour(target)}"]`);
+    selectHour(target, tick);
+    tick.scrollIntoView({ inline: "center", block: "nearest" });
   });
 
   const last = hours[hours.length - 1];
@@ -543,67 +503,52 @@ async function selectHour(hour, tick) {
   selectedTick = tick;
 
   const dayEl = tick.closest(".day");
-  track.querySelectorAll(".day.selected").forEach((d) => {
-    if (d !== dayEl) d.classList.remove("selected");
-  });
-  track.querySelectorAll(".day.expanded").forEach((d) => {
-    if (d !== dayEl) d.classList.remove("expanded");
-  });
-  dayEl.classList.add("selected");
-  dayEl.classList.add("expanded");
+  for (const name of ["selected", "expanded"]) {
+    track.querySelectorAll(`.day.${name}`).forEach((d) => {
+      if (d !== dayEl) d.classList.remove(name);
+    });
+  }
+  dayEl.classList.add("selected", "expanded");
 
   label.textContent = fmtLabel(hour);
   jump.value = fmtDay(hour);
 
-  const at = encodeURIComponent(fmtHour(hour));
   const request = ++pendingHour;
-  const [conditions, vessels, strandings, risk, climatology, forecast] =
-    await Promise.all([
-    fetch(`/api/conditions?at=${at}`).then((response) => response.json()),
-    fetch(`/api/vessels?at=${at}`).then((response) => response.json()),
-    fetch(`/api/strandings?day=${fmtDay(hour)}`).then((response) => response.json()),
-    fetch(`/api/risk?at=${at}`).then((response) => response.json()),
-    fetch(`/api/climatology?at=${at}`).then((response) => response.json()),
-    fetch(`/api/forecast?at=${at}`).then((response) => response.json()),
-  ]);
+  const data = await snapshot(hour);
   if (request !== pendingHour) return;
 
-  map.setPaintProperty(RISK_LAYER.id, "line-color", riskColorExpression(risk.peak));
-  map.getSource(RISK_LAYER.id).setData(risk);
-  map.setPaintProperty(
-    CLIMATOLOGY_LAYER.id,
-    "line-color",
-    climatologyColorExpression(climatology.peak),
-  );
-  map.getSource(CLIMATOLOGY_LAYER.id).setData(climatology);
-  map.setPaintProperty(
-    FORECAST_LAYER.id,
-    "line-color",
-    forecastColorExpression(forecast.peak),
-  );
-  map.getSource(FORECAST_LAYER.id).setData(forecast);
-
-  const missing = risk.missing_release_days ?? [];
   const counts = {
-    vessels: vessels.length,
-    strandings: strandings.length,
-    risk: risk.features.length,
-    climatology: climatology.features.length,
-    forecast: forecast.features.length,
+    vessels: data.vessels.length,
+    strandings: data.strandings.length,
   };
-  const notes = missing.length
-    ? {
-        risk:
-          `Partial: ${missing.length} of ${risk.release_days_expected} release ` +
-          `days not simulated yet (${missing[0]} → ${missing[missing.length - 1]})`,
-      }
-    : {};
+  for (const layer of SEGMENT_LAYERS) {
+    const collection = data[layer.id];
+    map.setPaintProperty(layer.id, "line-color", rampExpression(layer, collection.peak));
+    map.getSource(layer.id).setData(collection);
+    counts[layer.id] = collection.features.length;
+  }
   for (const layer of CONDITION_LAYERS) {
-    const rows = conditionRows(conditions, layer);
+    const rows = conditionRows(data.conditions, layer);
     map.getSource(layer.id).setData(toFeatureCollection(rows));
     counts[layer.id] = rows.length;
   }
-  map.getSource("vessels").setData(toFeatureCollection(vessels));
-  map.getSource("strandings").setData(toFeatureCollection(strandings));
-  renderLegend(counts, notes);
+  for (const layer of POINT_LAYERS) {
+    map.getSource(layer.id).setData(toFeatureCollection(data[layer.id]));
+  }
+  renderLegend(counts, riskNotes(data.risk));
 }
+
+map.on("load", async () => {
+  registerArrows(map);
+  SEGMENT_LAYERS.forEach(addSegmentLayer);
+  CONDITION_LAYERS.forEach(addArrowLayer);
+  POINT_LAYERS.forEach(addCircleLayer);
+  renderLegend({});
+
+  const range = await fetchJson("/api/range");
+  if (!range.min || !range.max) {
+    label.textContent = "No data ingested yet";
+    return;
+  }
+  buildTimeline(floorHour(range.min), floorHour(range.max));
+});

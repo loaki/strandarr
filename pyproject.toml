@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.scripts]
-strandarr = "strandarr.__main__:main"
+strandarr = "strandarr.cli.main:main"
 
 [dependency-groups]
 dev = [

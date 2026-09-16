@@ -1,4 +1,5 @@
 from datetime import date
+from typing import ClassVar
 
 from sqlalchemy import Date, Float, ForeignKey, Index, String
 from sqlalchemy.orm import Mapped, mapped_column
@@ -18,6 +19,12 @@ class DriftDaily(Base):
             unique=True,
         ),
         Index("ix_drift_daily_day", "day"),
+    )
+    __conflict__: ClassVar[tuple[str, ...]] = (
+        "release_day",
+        "day",
+        "coastal_segment_id",
+        "model_version",
     )
 
     release_day: Mapped[date] = mapped_column(Date, nullable=False)
@@ -40,6 +47,11 @@ class SegmentForecast(Base):
             unique=True,
         ),
         Index("ix_segment_forecast_day", "day"),
+    )
+    __conflict__: ClassVar[tuple[str, ...]] = (
+        "day",
+        "coastal_segment_id",
+        "model_version",
     )
 
     day: Mapped[date] = mapped_column(Date, nullable=False)

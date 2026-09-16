@@ -2,7 +2,8 @@ import logging
 
 import httpx
 
-from strandarr.connectors.http import request_json
+from strandarr.connectors.http import request_object
+from strandarr.geo import Point
 
 logger = logging.getLogger(__name__)
 
@@ -12,26 +13,21 @@ POINTS_PER_REQUEST = 100
 TIMEOUT_SECONDS = 60
 
 
-def fetch_elevations(
-    points: list[tuple[float, float]],
-) -> dict[tuple[float, float], float]:
-    elevations: dict[tuple[float, float], float] = {}
+def fetch_elevations(points: list[Point]) -> dict[Point, float]:
+    elevations: dict[Point, float] = {}
     with httpx.Client(timeout=TIMEOUT_SECONDS) as client:
         for offset in range(0, len(points), POINTS_PER_REQUEST):
             batch = points[offset : offset + POINTS_PER_REQUEST]
-            payload = request_json(
+            payload = request_object(
                 client,
                 "GET",
                 ELEVATION_URL,
+                "bathymetry",
                 cost=len(batch),
                 params={
                     "locations": "|".join(f"{lat},{lon}" for lat, lon in batch),
                 },
             )
-            if not isinstance(payload, dict):
-                raise RuntimeError(
-                    f"bathymetry: expected an object, got {type(payload).__name__}"
-                )
             if payload.get("status") != "OK":
                 raise RuntimeError(f"bathymetry: {payload.get('error', payload)}")
             results = payload.get("results", [])

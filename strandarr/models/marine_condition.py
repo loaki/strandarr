@@ -15,6 +15,12 @@ class MarineCondition(Base):
         ),
         Index("ix_marine_condition_source_cell", "source", "lat", "lon"),
     )
+    __conflict__: ClassVar[tuple[str, ...]] = (
+        "valid_at",
+        "lat",
+        "lon",
+        "source",
+    )
 
     MEASUREMENTS: ClassVar[tuple[str, ...]] = (
         "wind_speed_kmh",

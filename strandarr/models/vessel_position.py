@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import ClassVar
 
 from sqlalchemy import DateTime, Float, Index, String
 from sqlalchemy.orm import Mapped, mapped_column
@@ -10,6 +11,10 @@ class VesselPosition(Base):
     __tablename__ = "vessel_position"
     __table_args__ = (
         Index("ix_vessel_position_dedup", "mmsi", "recorded_at", unique=True),
+    )
+    __conflict__: ClassVar[tuple[str, ...]] = (
+        "mmsi",
+        "recorded_at",
     )
 
     recorded_at: Mapped[datetime] = mapped_column(

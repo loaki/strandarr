@@ -5,9 +5,9 @@ from typing import Any
 
 import httpx
 
-from strandarr.connectors.http import request_json
+from strandarr.connectors.http import request_object
 from strandarr.geo import NearestIndex, Point, bearing_deg, densify, distance_km
-from strandarr.grid import in_bbox
+from strandarr.grid import GRID
 from strandarr.models import CoastalSegment
 
 logger = logging.getLogger(__name__)
@@ -25,16 +25,12 @@ REGION_MARGIN_DEG = 4.0
 
 def fetch_lines() -> list[list[Point]]:
     with httpx.Client(timeout=TIMEOUT_SECONDS) as client:
-        payload = request_json(client, "GET", COASTLINE_URL)
-    if not isinstance(payload, dict):
-        raise RuntimeError(
-            f"coastline: expected an object, got {type(payload).__name__}"
-        )
+        payload = request_object(client, "GET", COASTLINE_URL, "coastline")
     lines = [
         line
         for feature in payload.get("features", [])
         for line in _lines(feature.get("geometry") or {})
-        if any(in_bbox(lat, lon, REGION_MARGIN_DEG) for lat, lon in line)
+        if any(GRID.bbox.contains(lat, lon, REGION_MARGIN_DEG) for lat, lon in line)
     ]
     logger.info("coastline: %d line(s) near the region", len(lines))
     return lines
@@ -74,7 +70,7 @@ def _segments(line: list[Point]) -> list[CoastalSegment]:
             length = 0.0
     if len(points) > 1 and length >= SEGMENT_LENGTH_KM / 2:
         closed.append(_segment(points, length))
-    return [s for s in closed if in_bbox(s.center_lat, s.center_lon)]
+    return [s for s in closed if GRID.bbox.contains(s.center_lat, s.center_lon)]
 
 
 def _segment(points: list[Point], length_km: float) -> CoastalSegment:

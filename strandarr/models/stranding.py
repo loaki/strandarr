@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import ClassVar
 
 from sqlalchemy import DateTime, Float, Index, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
@@ -10,6 +11,10 @@ class Stranding(Base):
     __tablename__ = "stranding"
     __table_args__ = (
         Index("ix_stranding_dedup", "source", "external_id", unique=True),
+    )
+    __conflict__: ClassVar[tuple[str, ...]] = (
+        "source",
+        "external_id",
     )
 
     recorded_at: Mapped[datetime] = mapped_column(

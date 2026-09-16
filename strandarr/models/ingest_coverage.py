@@ -1,4 +1,5 @@
 from datetime import date
+from typing import ClassVar
 
 from sqlalchemy import Boolean, Date, Index, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
@@ -9,6 +10,10 @@ from strandarr.models.base import Base
 class IngestCoverage(Base):
     __tablename__ = "ingest_coverage"
     __table_args__ = (Index("ix_ingest_coverage_dedup", "kind", "day", unique=True),)
+    __conflict__: ClassVar[tuple[str, ...]] = (
+        "kind",
+        "day",
+    )
 
     kind: Mapped[str] = mapped_column(String(64), nullable=False)
     day: Mapped[date] = mapped_column(Date, nullable=False)
