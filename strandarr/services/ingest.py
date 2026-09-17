@@ -1,14 +1,12 @@
 import logging
-from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date
 
 from strandarr.analysis.geo import GRID, BBox, Point
 from strandarr.analysis.timeframe import DayRange
 from strandarr.config import settings
 from strandarr.connectors import gfw, open_meteo, sources
-from strandarr.db.queries import reference
+from strandarr.db.queries import environment, reference
 from strandarr.db.upsert import upsert
 from strandarr.jobs.task import Context, Payload, Task
 from strandarr.models import MarineCondition, Stranding, VesselPosition
@@ -23,12 +21,14 @@ class ArchiveIngest(Task):
     product: open_meteo.Product
 
     def run(self, ctx: Context, payload: Payload) -> int:
-        days = payload.span
-        covered = ctx.covered(days, payload.force)
-        ranges = days.missing(covered)
+        days = self.days(payload)
+        if days is None:
+            return 0
+        stored = ctx.settled(days, payload.force)
+        ranges = days.missing(stored)
         if not ranges:
             logger.info(
-                "%s: %s..%s is already covered",
+                "%s: %s..%s is already settled",
                 self.product.source,
                 days.start,
                 days.end,
@@ -37,29 +37,33 @@ class ArchiveIngest(Task):
 
         points = reference.ingest_points(ctx.session)
         logger.info(
-            "%s: requesting %d of %d grid cells, %d day(s) already covered",
+            "%s: requesting %d of %d grid cells, %d day(s) already settled",
             self.product.source,
             len(points),
             len(GRID.points()),
-            len(covered),
+            len(stored),
         )
         return sum(
-            self._span(ctx, points, chunk, payload.force)
+            self._span(ctx, points, chunk)
             for span in ranges
             for chunk in span.chunks(open_meteo.DAYS_PER_REQUEST)
         )
 
-    def _span(
-        self, ctx: Context, points: list[Point], days: DayRange, force: bool
-    ) -> int:
+    def _span(self, ctx: Context, points: list[Point], days: DayRange) -> int:
         written = 0
-        counts: Counter[date] = Counter()
         for rows in open_meteo.iter_archive(self.product, points, days):
-            written += upsert(ctx.session, MarineCondition, rows, overwrite=force)
-            counts.update(row.valid_at.date() for row in rows)
+            written += upsert(ctx.session, MarineCondition, rows, overwrite=True)
             ctx.commit()
-        ctx.record({day: count for day, count in counts.items() if day in days})
+        counts = environment.day_counts(ctx.session, self.product.source, days)
+        moved = ctx.measure({day: counts.get(day, (0, 0)) for day in days})
         ctx.commit()
+        logger.info(
+            "%s: %s..%s stored, %d day(s) changed state",
+            self.product.source,
+            days.start,
+            days.end,
+            moved,
+        )
         return written
 
 
@@ -80,18 +84,20 @@ class ForecastIngest(Task):
 @dataclass(frozen=True, kw_only=True)
 class VesselIngest(Task):
     def run(self, ctx: Context, payload: Payload) -> int:
-        days = payload.span
-        covered = ctx.covered(days, payload.force)
-        if covered:
+        days = self.days(payload)
+        if days is None:
+            return 0
+        stored = ctx.settled(days, payload.force)
+        if stored:
             logger.info(
-                "%s: %d day(s) already covered, not re-requested",
+                "%s: %d day(s) already settled, not re-requested",
                 sources.GFW_FISHING,
-                len(covered),
+                len(stored),
             )
 
         total = 0
         for day, positions in gfw.iter_positions(
-            gfw.FISHING_DATASET, sources.GFW_FISHING, GRID.bbox, days, covered
+            gfw.FISHING_DATASET, sources.GFW_FISHING, GRID.bbox, days, stored
         ):
             written = upsert(ctx.session, VesselPosition, positions, overwrite=True)
             ctx.record({day: written})
@@ -105,7 +111,10 @@ class StrandingIngest(Task):
     fetch: Fetch
 
     def run(self, ctx: Context, payload: Payload) -> int:
-        rows = self.fetch(GRID.bbox, payload.span)
+        days = self.days(payload)
+        if days is None:
+            return 0
+        rows = self.fetch(GRID.bbox, days)
         written = upsert(ctx.session, Stranding, rows, overwrite=payload.force)
         ctx.commit()
         return written

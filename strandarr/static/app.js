@@ -54,53 +54,30 @@ const POINT_LAYERS = [
 
 const zoomWidth = (near, far) => ["interpolate", ["linear"], ["zoom"], 5, near, 10, far];
 
+const RISK_MAX = 0.08;
+
 const RISK_LAYER = {
   id: "risk",
-  label: "Relative stranding risk",
-  color: "#8e44ad",
-  stops: ["#f7e8c8", "#e8a33d", "#c0392b", "#6b1d6b"],
-  property: "drift_index",
+  label: "Stranding risk",
+  color: "#b8342a",
+  stops: ["#fdf0d5", "#f3b263", "#d1495b", "#6a1b2a"],
+  property: "probability",
+  domain: RISK_MAX,
   opacity: 0.9,
   width: [
     "interpolate",
     ["linear"],
     ["zoom"],
     5,
-    ["interpolate", ["linear"], ["get", "relative_index"], 0, 2.5, 100, 9],
+    ["interpolate", ["linear"], ["get", "relative_index"], 0, 0.6, 100, 9],
     10,
-    ["interpolate", ["linear"], ["get", "relative_index"], 0, 5, 100, 22],
+    ["interpolate", ["linear"], ["get", "relative_index"], 0, 1.2, 100, 22],
   ],
 };
 
-const FORECAST_LAYER = {
-  id: "forecast",
-  label: "Stranding forecast",
-  color: "#b8342a",
-  stops: ["#fdf0d5", "#f3b263", "#d1495b", "#6a1b2a"],
-  property: "probability",
-  opacity: 0.9,
-  width: zoomWidth(3.5, 14),
-};
+const SEGMENT_LAYERS = [RISK_LAYER];
 
-const CLIMATOLOGY_LAYER = {
-  id: "climatology",
-  label: "Seasonal stranding chance",
-  color: "#1b7a5a",
-  stops: ["#e8f3ec", "#7fc5a3", "#2e8b62", "#0d4a30"],
-  property: "probability",
-  opacity: 0.85,
-  width: zoomWidth(3, 12),
-};
-
-const SEGMENT_LAYERS = [RISK_LAYER, FORECAST_LAYER, CLIMATOLOGY_LAYER];
-
-const LAYERS = [
-  FORECAST_LAYER,
-  RISK_LAYER,
-  CLIMATOLOGY_LAYER,
-  ...CONDITION_LAYERS,
-  ...POINT_LAYERS,
-];
+const LAYERS = [RISK_LAYER, ...CONDITION_LAYERS, ...POINT_LAYERS];
 
 const FIELD_LABELS = {
   mmsi: "MMSI",
@@ -135,14 +112,12 @@ const FIELD_LABELS = {
   sea_level_m: "Tide height",
   drift_index: "Drift index (unitless)",
   probability: "Chance of a stranding",
+  seasonal: "Seasonal chance here",
+  source: "Computed from",
   persistence: "Recent strandings nearby",
   swell_m: "Swell height",
   onshore_m: "Onshore wave",
-  expected_per_day: "Expected strandings / day",
-  observed: "Strandings on record",
-  years: "Years on record",
-  relative_index: "Share of the hour's peak",
-  release_days: "Contributing release days",
+  relative_index: "Share of the day's peak",
   length_km: "Segment length",
   segment_id: "Segment",
 };
@@ -172,8 +147,8 @@ const DIRECTION_SENSE = {
   swell_direction_deg: "toward",
 };
 
-const PERCENT = new Set(["probability"]);
-const PRECISE = new Set(["drift_index", "expected_per_day"]);
+const PERCENT = new Set(["probability", "seasonal"]);
+const PRECISE = new Set(["drift_index", "persistence"]);
 
 function lerpColor(a, b, t) {
   const from = [1, 3, 5].map((i) => parseInt(a.slice(i, i + 2), 16));
@@ -299,8 +274,8 @@ function iconImageExpression(layer) {
   return expression;
 }
 
-function rampExpression(layer, peak) {
-  const top = peak > 0 ? peak : 1;
+function rampExpression(layer) {
+  const top = layer.domain;
   const expression = ["interpolate", ["linear"], ["get", layer.property]];
   for (let i = 0; i < layer.stops.length; i++) {
     expression.push((top * i) / (layer.stops.length - 1), layer.stops[i]);
@@ -371,7 +346,7 @@ function addSegmentLayer(layer) {
     type: "line",
     layout: { "line-cap": "round", "line-join": "round" },
     paint: {
-      "line-color": rampExpression(layer, 1),
+      "line-color": rampExpression(layer),
       "line-width": layer.width,
       "line-opacity": layer.opacity,
     },
@@ -414,26 +389,36 @@ const fetchJson = (url) => fetch(url).then((response) => response.json());
 
 async function snapshot(hour) {
   const at = encodeURIComponent(fmtHour(hour));
-  const [conditions, vessels, strandings, risk, forecast, climatology] =
-    await Promise.all([
-      fetchJson(`/api/conditions?at=${at}`),
-      fetchJson(`/api/vessels?at=${at}`),
-      fetchJson(`/api/strandings?day=${fmtDay(hour)}`),
-      fetchJson(`/api/risk?at=${at}`),
-      fetchJson(`/api/forecast?at=${at}`),
-      fetchJson(`/api/climatology?at=${at}`),
-    ]);
-  return { conditions, vessels, strandings, risk, forecast, climatology };
+  const [conditions, vessels, strandings, risk] = await Promise.all([
+    fetchJson(`/api/conditions?at=${at}`),
+    fetchJson(`/api/vessels?at=${at}`),
+    fetchJson(`/api/strandings?day=${fmtDay(hour)}`),
+    fetchJson(`/api/risk?at=${at}`),
+  ]);
+  return { conditions, vessels, strandings, risk };
 }
 
 function riskNotes(risk) {
+  const expected = risk.release_days_expected;
   const missing = risk.missing_release_days ?? [];
-  if (!missing.length) return {};
-  return {
-    risk:
-      `Partial: ${missing.length} of ${risk.release_days_expected} release ` +
-      `days not simulated yet (${missing[0]} → ${missing[missing.length - 1]})`,
-  };
+  const provisional = risk.provisional_release_days ?? [];
+  const forecast = (risk.features ?? []).some(
+    (feature) => feature.properties.source === "forecast",
+  );
+  const parts = [];
+  if (forecast) parts.push("computed from forecast conditions");
+  if (missing.length)
+    parts.push(
+      `${missing.length} of ${expected} release days not simulated yet ` +
+        `(${missing[0]} → ${missing[missing.length - 1]})`,
+    );
+  if (provisional.length)
+    parts.push(
+      `${provisional.length} of ${expected} release days still run on forecast ` +
+        `conditions (${provisional[0]} → ${provisional[provisional.length - 1]})`,
+    );
+  if (!parts.length) return {};
+  return { risk: `Partial: ${parts.join("; ")}` };
 }
 
 function toggleDayExpanded(dayEl) {
@@ -523,7 +508,6 @@ async function selectHour(hour, tick) {
   };
   for (const layer of SEGMENT_LAYERS) {
     const collection = data[layer.id];
-    map.setPaintProperty(layer.id, "line-color", rampExpression(layer, collection.peak));
     map.getSource(layer.id).setData(collection);
     counts[layer.id] = collection.features.length;
   }

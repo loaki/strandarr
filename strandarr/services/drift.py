@@ -16,31 +16,54 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True, kw_only=True)
 class DriftArrivals(Task):
     def run(self, ctx: Context, payload: Payload) -> int:
-        days = payload.span
-        done = ctx.covered(days, payload.force)
+        days = self.days(payload)
+        if days is None:
+            return 0
+        done = ctx.settled(days, payload.force)
         effort = coverage.covered(ctx.session, kinds.VESSEL_POSITIONS, days)
+        forced = coverage.forced_days(ctx.session, days)
+        live = coverage.provisional_from(ctx.session)
+
         todo = [day for day in days if day not in done]
-        pending = [day for day in todo if day in effort]
+        seeded = [day for day in todo if day in effort]
+        pending = [day for day in seeded if day in forced or day >= live]
+        stalled = [day for day in seeded if day not in pending]
         if done:
-            logger.info("drift: %d day(s) already complete, skipped", len(done))
-        if len(pending) < len(todo):
+            logger.info("drift: %d day(s) already settled, skipped", len(done))
+        if len(seeded) < len(todo):
             logger.info(
                 "drift: %d day(s) waiting on %s, not simulated",
-                len(todo) - len(pending),
+                len(todo) - len(seeded),
                 kinds.VESSEL_POSITIONS,
             )
+        if stalled:
+            logger.info(
+                "drift: %d day(s) waiting on the archive, not simulated", len(stalled)
+            )
+            coverage.stall(ctx.session, self.kind, stalled)
+            ctx.commit()
         if not pending:
             return 0
 
         index = reference.segments(ctx.session)
         raster = coast.build(index, drift.BEACHING_DISTANCE_KM)
-        return sum(self._day(ctx, day, raster) for day in pending)
+        return sum(
+            self._day(ctx, day, raster, day in forced, day >= live) for day in pending
+        )
 
-    def _day(self, ctx: Context, day: date, raster: coast.Coast) -> int:
+    def _day(
+        self,
+        ctx: Context,
+        day: date,
+        raster: coast.Coast,
+        definitive: bool,
+        live: bool,
+    ) -> int:
         released_at = midnight(day)
         seeds = drift.seeds(observation.vessel_day(ctx.session, day), day)
         forcing = drift.build_forcing(environment.forcing(ctx.session, day))
         result = drift.simulate(seeds, forcing, raster)
+        complete = definitive and result.complete
 
         totals: dict[tuple[date, int], float] = {}
         for arrival in result.arrivals:
@@ -71,12 +94,16 @@ class DriftArrivals(Task):
                 DriftRelease(
                     release_at=released_at,
                     model_version=drift.MODEL_VERSION,
-                    complete=result.complete,
+                    complete=complete,
                 )
             ],
             overwrite=True,
         )
-        ctx.record({day: len(result.arrivals)}, complete=result.complete)
+        ctx.record(
+            {day: len(result.arrivals)},
+            complete=complete,
+            recheck=not complete and not live,
+        )
         ctx.commit()
 
         logger.info(
@@ -89,6 +116,6 @@ class DriftArrivals(Task):
             result.stranded_weight,
             len(result.arrivals),
             result.forcing_hours,
-            "" if result.complete else " (incomplete, will re-run)",
+            "" if complete else " (provisional, will re-run)",
         )
         return len(result.arrivals)

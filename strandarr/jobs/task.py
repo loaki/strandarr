@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from strandarr.analysis.timeframe import DayRange
+from strandarr.config import settings
 from strandarr.db.queries import coverage
 
 logger = logging.getLogger(__name__)
@@ -20,6 +21,10 @@ HISTOCARTO_FIRST_DAY = date(2023, 1, 1)
 GFW_FIRST_DAY = date(2012, 1, 1)
 GFW_LAG_DAYS = 4
 
+ARCHIVE_LAG_DAYS = 5
+
+FORECAST_AHEAD_DAYS = settings.marine_forecast_hours // 24
+
 CHUNK_EPOCH = ERA5_FIRST_DAY
 CHUNK_DAYS = 14
 
@@ -29,12 +34,13 @@ class Window:
     first_day: date = date.min
     last_day: date = date.max
     lag_days: int = 0
+    ahead_days: int = 0
     rolling: bool = False
     tracked: bool = True
     chunk_days: int = CHUNK_DAYS
 
     def clamp(self, days: DayRange) -> DayRange | None:
-        available = date.today() - timedelta(days=self.lag_days)
+        available = date.today() + timedelta(days=self.ahead_days - self.lag_days)
         return days.clamped(self.first_day, min(self.last_day, available))
 
 
@@ -58,9 +64,8 @@ class Payload:
         return {"start": start, "end": end, "force": self.force}
 
     @property
-    def key(self) -> tuple[str | None, str | None, bool]:
-        raw = self.dump()
-        return raw.get("start"), raw.get("end"), self.force
+    def key(self) -> tuple[str | None, bool]:
+        return self.dump().get("start"), self.force
 
     @property
     def span(self) -> DayRange:
@@ -77,8 +82,19 @@ class Context:
     def covered(self, days: DayRange, force: bool = False) -> set[date]:
         return set() if force else coverage.covered(self.session, self.kind, days)
 
-    def record(self, counts: Mapping[date, int], complete: bool = True) -> None:
-        coverage.record(self.session, self.kind, counts, complete)
+    def settled(self, days: DayRange, force: bool = False) -> set[date]:
+        return set() if force else coverage.settled(self.session, self.kind, days)
+
+    def record(
+        self,
+        counts: Mapping[date, int],
+        complete: bool = True,
+        recheck: bool = False,
+    ) -> None:
+        coverage.record(self.session, self.kind, counts, complete, recheck)
+
+    def measure(self, counts: Mapping[date, tuple[int, int]]) -> int:
+        return coverage.measure(self.session, self.kind, counts)
 
     def commit(self) -> None:
         self.session.commit()
@@ -94,6 +110,9 @@ class Task:
 
     def context(self, session: Session) -> Context:
         return Context(session=session, kind=self.kind)
+
+    def days(self, payload: Payload) -> DayRange | None:
+        return self.window.clamp(payload.span)
 
     def payloads(self, session: Session, days: DayRange, force: bool) -> list[Payload]:
         if self.window.rolling:
@@ -118,12 +137,12 @@ class Task:
         if not self.window.tracked:
             return [Payload(days=window, force=force)]
 
-        covered = set() if force else coverage.covered(session, self.kind, window)
-        if covered:
+        stored = set() if force else coverage.settled(session, self.kind, window)
+        if stored:
             logger.info(
-                "%s: %d day(s) already covered, skipped", self.kind, len(covered)
+                "%s: %d day(s) already settled, skipped", self.kind, len(stored)
             )
         return [
             Payload(days=chunk, force=force)
-            for chunk in window.buckets(self.window.chunk_days, CHUNK_EPOCH, covered)
+            for chunk in window.buckets(self.window.chunk_days, CHUNK_EPOCH, stored)
         ]

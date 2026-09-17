@@ -15,7 +15,7 @@ MAX_ATTEMPTS = 3
 RETRY_DELAY = timedelta(minutes=1)
 UNFINISHED = (JobStatus.PENDING, JobStatus.RUNNING)
 
-Key = tuple[str | None, str | None, bool]
+Key = tuple[str | None, bool]
 
 
 def release_running(session: Session) -> None:

@@ -4,7 +4,7 @@ from typing import Any
 
 from fastapi import APIRouter
 
-from strandarr.analysis import climatology, drift, forecast
+from strandarr.analysis import drift, risk
 from strandarr.analysis.timeframe import DayRange
 from strandarr.connectors import sources
 from strandarr.db.queries import coverage, environment, observation, prediction
@@ -16,8 +16,7 @@ router = APIRouter(prefix="/api")
 
 VERSIONS = {
     "drift": drift.MODEL_VERSION,
-    "climatology": climatology.MODEL_VERSION,
-    "forecast": forecast.MODEL_VERSION,
+    "risk": risk.MODEL_VERSION,
 }
 
 VESSEL_FIELDS = (
@@ -47,24 +46,15 @@ STRANDING_FIELDS = (
     "external_id",
 )
 
-RISK_PROPS = {"drift_index": float, "release_days": int}
-
-CLIMATOLOGY_PROPS = {
+RISK_PROPS = {
     "probability": float,
-    "expected_per_day": float,
-    "observed": float,
-    "years": int,
-}
-
-FORECAST_PROPS = {
-    "probability": float,
-    "persistence": float,
+    "seasonal": float,
     "drift_index": float,
+    "persistence": float,
     "swell_m": float,
     "onshore_m": float,
+    "source": str,
 }
-
-RANKED = 50
 
 
 @router.get("/range")
@@ -121,35 +111,14 @@ def get_strandings(day: Day, db: Db) -> list[dict[str, Any]]:
 @router.get("/risk")
 def get_risk(at: Hour, db: Db) -> dict[str, Any]:
     day = hour(at).date()
-    needed, missing = coverage.missing_releases(db, day)
+    releases = coverage.releases(db, day)
     return collection(
         prediction.risk(db, day),
         RISK_PROPS,
-        peak_of="drift_index",
-        relative_of="drift_index",
-        release_days_expected=len(needed),
-        complete=not missing,
-        missing_release_days=[day.isoformat() for day in missing],
-    )
-
-
-@router.get("/climatology")
-def get_climatology(at: Hour, db: Db) -> dict[str, Any]:
-    day = hour(at).date()
-    return collection(
-        prediction.climatology(db, climatology.slot(day) + 1),
-        CLIMATOLOGY_PROPS,
         peak_of="probability",
-        window_days=climatology.WINDOW_DAYS,
+        relative_of="probability",
+        release_days_expected=len(releases.needed),
+        complete=not releases.missing and not releases.provisional,
+        missing_release_days=[day.isoformat() for day in releases.missing],
+        provisional_release_days=[day.isoformat() for day in releases.provisional],
     )
-
-
-@router.get("/forecast")
-def get_forecast(at: Hour, db: Db) -> dict[str, Any]:
-    payload = collection(
-        prediction.forecast(db, hour(at).date()), FORECAST_PROPS, peak_of="probability"
-    )
-    payload["rank"] = [
-        feature["properties"]["segment_id"] for feature in payload["features"][:RANKED]
-    ]
-    return payload

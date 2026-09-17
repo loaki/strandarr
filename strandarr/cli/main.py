@@ -6,13 +6,15 @@ from datetime import date
 from sqlalchemy.orm import Session
 
 from strandarr import log
-from strandarr.analysis.drift import MAX_DRIFT_DAYS
 from strandarr.cli import render
 from strandarr.db.engine import unit_of_work
 from strandarr.jobs import worker
 from strandarr.jobs.schedule import schedule_missing
-from strandarr.jobs.task import DEFAULT_BACKFILL_DAYS, MARINE_ARCHIVE_FIRST_DAY
-from strandarr.services import aisstream, experiment, reference, validation
+from strandarr.jobs.task import (
+    DEFAULT_BACKFILL_DAYS,
+    FORECAST_AHEAD_DAYS,
+)
+from strandarr.services import aisstream, audit, reference
 
 Setup = Callable[[argparse.ArgumentParser], None]
 Run = Callable[[argparse.Namespace], None]
@@ -37,28 +39,13 @@ def _ingest_args(parser: argparse.ArgumentParser) -> None:
     _span(
         parser,
         f"first day to ingest (default: {DEFAULT_BACKFILL_DAYS} days ago)",
-        "last day to ingest (default: today)",
+        f"last day to ingest (default: today plus {FORECAST_AHEAD_DAYS} forecast "
+        f"day(s); only the forecast is computed past today)",
     )
     parser.add_argument(
         "--force",
         action="store_true",
         help="re-request days already stored and overwrite them",
-    )
-
-
-def _scoring_args(parser: argparse.ArgumentParser) -> None:
-    _span(
-        parser,
-        f"first day to score (default: {MARINE_ARCHIVE_FIRST_DAY})",
-        "last day to score (default: today)",
-    )
-    parser.add_argument(
-        "--min-release-days",
-        type=int,
-        default=MAX_DRIFT_DAYS,
-        metavar="N",
-        help=f"simulated release days required per scored day "
-        f"(default: {MAX_DRIFT_DAYS})",
     )
 
 
@@ -74,30 +61,24 @@ def _ingest(session: Session, args: argparse.Namespace) -> None:
     schedule_missing(session, start=args.start, end=args.end, force=args.force)
 
 
-def _validate(session: Session, args: argparse.Namespace) -> None:
-    render.validation(
-        validation.evaluate(
-            session,
-            start=args.start or MARINE_ARCHIVE_FIRST_DAY,
-            end=args.end or date.today(),
-            min_release_days=args.min_release_days,
-        )
-    )
-
-
-def _experiment(session: Session, args: argparse.Namespace) -> None:
-    render.search(
-        experiment.dataset(
-            session,
-            start=args.start or MARINE_ARCHIVE_FIRST_DAY,
-            end=args.end or date.today(),
-            min_release_days=args.min_release_days,
-        )
-    )
-
-
 def _reference(session: Session, args: argparse.Namespace) -> None:
     render.reference(reference.build(session))
+
+
+def _coverage_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="recount every stored day and reflag what was computed from it. "
+        "Stop the worker first",
+    )
+
+
+def _coverage(session: Session, args: argparse.Namespace) -> None:
+    render.coverage(
+        audit.rebuild(session) if args.rebuild else audit.report(session),
+        audit.stored_hours(session),
+    )
 
 
 @dataclass(frozen=True)
@@ -116,24 +97,18 @@ COMMANDS: tuple[Command, ...] = (
         _ingest_args,
     ),
     Command(
-        "validate",
-        "score drift predictions against recorded strandings",
-        _scoped(_validate),
-        _scoring_args,
-    ),
-    Command(
-        "experiment",
-        "search for a drift scoring recipe that beats climatology",
-        _scoped(_experiment),
-        _scoring_args,
-    ),
-    Command(
         "worker", "consume queued jobs until stopped", lambda _: worker.run_forever()
     ),
     Command(
         "aisstream",
         "record the live AIS feed until stopped",
         lambda _: aisstream.run_forever(),
+    ),
+    Command(
+        "coverage",
+        "report what each day holds, and how much of it is usable",
+        _scoped(_coverage),
+        _coverage_args,
     ),
     Command(
         "reference",

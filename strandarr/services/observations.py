@@ -13,15 +13,11 @@ from strandarr.db.queries import observation
 
 SNAP_RADIUS_KM = 15.0
 
-UNKNOWN_PRECISION = "unknown"
-
 
 @dataclass(frozen=True)
 class Observation:
     day: date
     segment: int
-    individuals: int
-    precision: str
 
 
 def snap(
@@ -38,8 +34,6 @@ def snap(
         Observation(
             day=day_of(row.recorded_at),
             segment=int(position),
-            individuals=row.individual_count,
-            precision=row.location_precision or UNKNOWN_PRECISION,
         )
         for row, position, km in zip(rows, segment, distance, strict=True)
         if position >= 0 and km <= radius_km
