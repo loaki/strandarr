@@ -12,10 +12,7 @@ class Stranding(Base):
     __table_args__ = (
         Index("ix_stranding_dedup", "source", "external_id", unique=True),
     )
-    __conflict__: ClassVar[tuple[str, ...]] = (
-        "source",
-        "external_id",
-    )
+    __conflict__: ClassVar[tuple[str, ...]] = ("source", "external_id")
 
     recorded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, index=True
@@ -28,9 +25,5 @@ class Stranding(Base):
     species_common: Mapped[str | None] = mapped_column(String(255))
     individual_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     coordinate_uncertainty_m: Mapped[float | None] = mapped_column(Float)
-
-    coordinate_precision_deg: Mapped[float | None] = mapped_column(Float)
-
     time_uncertainty_hours: Mapped[float | None] = mapped_column(Float)
-
     location_precision: Mapped[str | None] = mapped_column(String(32))

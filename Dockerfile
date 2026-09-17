@@ -10,4 +10,4 @@ RUN uv sync --frozen --no-dev
 
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1
-CMD ["strandarr", "worker"]
+CMD ["strandarr", "work"]

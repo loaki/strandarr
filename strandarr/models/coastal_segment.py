@@ -18,5 +18,5 @@ class CoastalSegment(Base):
     center_lat: Mapped[float] = mapped_column(Float, nullable=False)
     center_lon: Mapped[float] = mapped_column(Float, nullable=False)
     length_km: Mapped[float] = mapped_column(Float, nullable=False)
-    coastline_orientation_deg: Mapped[float | None] = mapped_column(Float)
+    orientation_deg: Mapped[float | None] = mapped_column(Float)
     path: Mapped[list[list[float]] | None] = mapped_column(JSONB)

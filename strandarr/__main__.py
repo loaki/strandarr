@@ -1,4 +1,4 @@
-from strandarr.cli.main import main
+from strandarr.cli import main
 
 if __name__ == "__main__":
     main()

@@ -16,39 +16,15 @@ services:
       timeout: 3s
       retries: 10
 
-  migrate:
+  # Migrates, then builds the coastal segments. Everything else waits on it.
+  init:
     build: .
     restart: "no"
     env_file: .env
     environment:
       POSTGRES_HOST: db
       POSTGRES_PORT: 5432
-    command: [ "alembic", "upgrade", "head" ]
-    depends_on:
-      db:
-        condition: service_healthy
-
-  reference:
-    build: .
-    restart: "no"
-    env_file: .env
-    environment:
-      POSTGRES_HOST: db
-      POSTGRES_PORT: 5432
-    command: [ "strandarr", "reference" ]
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
-
-  ingest:
-    build: .
-    profiles: [ "cli" ]
-    restart: "no"
-    env_file: .env
-    environment:
-      POSTGRES_HOST: db
-      POSTGRES_PORT: 5432
-    entrypoint: [ "strandarr", "ingest" ]
+    command: [ "sh", "-c", "alembic upgrade head && strandarr reference" ]
     depends_on:
       db:
         condition: service_healthy
@@ -62,7 +38,7 @@ services:
       POSTGRES_PORT: 5432
     command:
       - uvicorn
-      - strandarr.web.app:app
+      - strandarr.web:app
       - --host
       - 0.0.0.0
       - --port
@@ -71,7 +47,7 @@ services:
       - --forwarded-allow-ips
       - "*"
     depends_on:
-      reference:
+      init:
         condition: service_completed_successfully
     networks:
       - default
@@ -93,7 +69,7 @@ services:
       timeout: 10s
       retries: 3
       start_period: 20s
-    logging:
+    logging: &logging
       driver: json-file
       options:
         max-size: "10m"
@@ -106,15 +82,11 @@ services:
     environment:
       POSTGRES_HOST: db
       POSTGRES_PORT: 5432
-    command: [ "strandarr", "worker" ]
+    command: [ "strandarr", "work" ]
     depends_on:
-      reference:
+      init:
         condition: service_completed_successfully
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
+    logging: *logging
 
   aisstream:
     build: .
@@ -126,13 +98,9 @@ services:
       POSTGRES_PORT: 5432
     command: [ "strandarr", "aisstream" ]
     depends_on:
-      reference:
+      init:
         condition: service_completed_successfully
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
+    logging: *logging
 
   pgadmin:
     image: dpage/pgadmin4:8
@@ -149,11 +117,7 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
+    logging: *logging
 
 volumes:
   db_data:

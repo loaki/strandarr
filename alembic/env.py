@@ -1,8 +1,8 @@
-from alembic import context
 from sqlalchemy import create_engine
 
-from strandarr.models import Base
+from alembic import context
 from strandarr.config import settings
+from strandarr.models import Base
 
 target_metadata = Base.metadata
 

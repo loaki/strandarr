@@ -1,209 +1,170 @@
 const EMPTY = { type: "FeatureCollection", features: [] };
 const RAMP_STEPS = 10;
 
-const CONDITION_LAYERS = [
-  {
-    id: "wind",
-    label: "Wind",
-    color: "#f1c40f",
-    speed: "wind_speed_kmh",
-    direction: "wind_direction_deg",
-    max: 70,
-    from: true,
-    stops: ["#2ecc71", "#f1c40f", "#e74c3c"],
-    fields: ["wind_speed_kmh", "wind_direction_deg"],
-  },
-  {
-    id: "currents",
-    label: "Currents",
-    color: "#6c5ce7",
-    speed: "current_speed_kmh",
-    direction: "current_direction_deg",
-    max: 8,
-    from: false,
-    thick: true,
-    stops: ["#74b9ff", "#6c5ce7", "#e84393"],
-    fields: ["current_speed_kmh", "current_direction_deg"],
-  },
-  {
-    id: "waves",
-    label: "Waves",
-    color: "#22a6b3",
-    speed: "wave_height_m",
-    direction: "wave_direction_deg",
-    max: 8,
-    from: false,
-    stops: ["#dff9fb", "#22a6b3", "#130f40"],
-    fields: [
-      "wave_height_m",
-      "wave_direction_deg",
-      "wave_period_s",
-      "swell_height_m",
-      "swell_direction_deg",
-      "swell_period_s",
-      "sea_surface_temperature_c",
-      "sea_level_m",
-    ],
-  },
-];
-
-const POINT_LAYERS = [
-  { id: "vessels", label: "Vessels", color: "#2b6cb0", radius: 4 },
-  { id: "strandings", label: "Strandings", color: "#e63946", radius: 7 },
-];
-
-const zoomWidth = (near, far) => ["interpolate", ["linear"], ["zoom"], 5, near, 10, far];
-
 const RISK_MAX = 0.08;
 
-const RISK_LAYER = {
+const RISK = {
   id: "risk",
   label: "Stranding risk",
-  color: "#b8342a",
-  stops: ["#fdf0d5", "#f3b263", "#d1495b", "#6a1b2a"],
+  color: "#b91c1c",
   property: "probability",
   domain: RISK_MAX,
-  opacity: 0.9,
-  width: [
-    "interpolate",
-    ["linear"],
-    ["zoom"],
-    5,
-    ["interpolate", ["linear"], ["get", "relative_index"], 0, 0.6, 100, 9],
-    10,
-    ["interpolate", ["linear"], ["get", "relative_index"], 0, 1.2, 100, 22],
-  ],
+  stops: ["#1e3a8a", "#2563eb", "#22d3ee", "#facc15", "#f97316", "#b91c1c"],
 };
 
-const SEGMENT_LAYERS = [RISK_LAYER];
+const SEA = {
+  id: "sea",
+  label: "Sea state (waves)",
+  color: "#0369a1",
+  speed: "wave_height_m",
+  direction: "wave_direction_deg",
+  from: false,
+  max: 6,
+  stops: ["#bae6fd", "#38bdf8", "#0369a1", "#1e1b4b"],
+};
 
-const LAYERS = [RISK_LAYER, ...CONDITION_LAYERS, ...POINT_LAYERS];
+const POINTS = [
+  { id: "vessels", label: "Fishing vessels", color: "#0f766e", radius: 4 },
+  { id: "strandings", label: "Strandings", color: "#7c3aed", radius: 6 },
+];
+
+const LAYERS = [RISK, SEA, ...POINTS];
 
 const FIELD_LABELS = {
+  probability: "Probability",
+  seasonal: "Seasonal baseline",
+  relative_index: "Relative to peak",
+  persistence: "Recent nearby strandings",
+  drift_index: "Drift arrivals",
+  swell_m: "Swell height",
+  wave_m: "Wave height",
+  onshore_m: "Onshore wave push",
+  period_s: "Wave period",
+  source: "Computed from",
+  segment_id: "Segment",
+  length_km: "Segment length",
   mmsi: "MMSI",
-  ship_name: "Name",
+  ship_name: "Vessel",
   flag: "Flag",
   gear_type: "Gear",
   vessel_type: "Type",
-  effort_hours: "Fishing hours",
+  effort_hours: "Fishing effort",
+  recorded_at: "Recorded",
   species_scientific: "Species",
-  species_common: "Common name",
-  individual_count: "Animals",
-  recorded_at: "Recorded at",
+  species_common: "Nom commun",
+  individual_count: "Individuals",
   time_uncertainty_hours: "Time uncertainty",
   coordinate_uncertainty_m: "Position uncertainty",
   location_precision: "Position from",
-  source: "Source",
-  sources: "Sources",
   external_id: "Source id",
-  lat: "Latitude",
-  lon: "Longitude",
-  wind_speed_kmh: "Wind speed",
-  wind_direction_deg: "Wind direction",
-  current_speed_kmh: "Current speed",
-  current_direction_deg: "Current direction",
   wave_height_m: "Wave height",
   wave_direction_deg: "Wave direction",
   wave_period_s: "Wave period",
   swell_height_m: "Swell height",
-  swell_direction_deg: "Swell direction",
-  swell_period_s: "Swell period",
-  sea_surface_temperature_c: "Sea temperature",
-  sea_level_m: "Tide height",
-  drift_index: "Drift index (unitless)",
-  probability: "Chance of a stranding",
-  seasonal: "Seasonal chance here",
-  source: "Computed from",
-  persistence: "Recent strandings nearby",
-  swell_m: "Swell height",
-  onshore_m: "Onshore wave",
-  relative_index: "Share of the day's peak",
-  length_km: "Segment length",
-  segment_id: "Segment",
+  wind_speed_kmh: "Wind speed",
+  wind_direction_deg: "Wind direction",
+  current_speed_kmh: "Current speed",
+  current_direction_deg: "Current direction",
+  forecast: "Forecast",
 };
 
 const UNITS = {
-  swell_m: " m",
-  onshore_m: " m",
-  wind_speed_kmh: " km/h",
-  current_speed_kmh: " km/h",
-  wave_height_m: " m",
-  swell_height_m: " m",
-  wave_period_s: " s",
-  swell_period_s: " s",
-  effort_hours: " h",
-  time_uncertainty_hours: " h",
-  coordinate_uncertainty_m: " m",
-  sea_surface_temperature_c: " °C",
-  sea_level_m: " m",
-  length_km: " km",
-  relative_index: " / 100",
-};
-
-const DIRECTION_SENSE = {
-  wind_direction_deg: "from",
-  current_direction_deg: "toward",
-  wave_direction_deg: "toward",
-  swell_direction_deg: "toward",
+  length_km: "km",
+  effort_hours: "h",
+  time_uncertainty_hours: "h",
+  coordinate_uncertainty_m: "m",
+  wave_height_m: "m",
+  swell_height_m: "m",
+  wave_m: "m",
+  swell_m: "m",
+  onshore_m: "m",
+  period_s: "s",
+  wave_period_s: "s",
+  wind_speed_kmh: "km/h",
+  current_speed_kmh: "km/h",
+  wave_direction_deg: "°",
+  wind_direction_deg: "°",
+  current_direction_deg: "°",
+  relative_index: "%",
 };
 
 const PERCENT = new Set(["probability", "seasonal"]);
 const PRECISE = new Set(["drift_index", "persistence"]);
 
+const POPUP_FIELDS = {
+  risk: [
+    "probability", "relative_index", "seasonal", "persistence", "drift_index",
+    "swell_m", "wave_m", "onshore_m", "period_s", "source", "segment_id",
+  ],
+  sea: [
+    "wave_height_m", "wave_direction_deg", "wave_period_s", "swell_height_m",
+    "wind_speed_kmh", "wind_direction_deg", "current_speed_kmh",
+    "current_direction_deg", "forecast",
+  ],
+  vessels: [
+    "ship_name", "mmsi", "flag", "gear_type", "vessel_type", "effort_hours",
+    "recorded_at", "source",
+  ],
+  strandings: [
+    "species_common", "species_scientific", "individual_count", "recorded_at",
+    "time_uncertainty_hours", "coordinate_uncertainty_m", "location_precision",
+    "source", "external_id",
+  ],
+};
+
 function lerpColor(a, b, t) {
-  const from = [1, 3, 5].map((i) => parseInt(a.slice(i, i + 2), 16));
-  const to = [1, 3, 5].map((i) => parseInt(b.slice(i, i + 2), 16));
-  return `rgb(${from.map((v, i) => Math.round(v + (to[i] - v) * t)).join(",")})`;
+  const parse = (hex) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+  const [ar, ag, ab] = parse(a);
+  const [br, bg, bb] = parse(b);
+  const mix = (x, y) => Math.round(x + (y - x) * t);
+  return `rgb(${mix(ar, br)},${mix(ag, bg)},${mix(ab, bb)})`;
 }
 
 function rampColor(stops, t) {
-  const scaled = Math.max(0, Math.min(1, t)) * (stops.length - 1);
-  const i = Math.min(stops.length - 2, Math.floor(scaled));
-  return lerpColor(stops[i], stops[i + 1], scaled - i);
+  const span = 1 / (stops.length - 1);
+  const index = Math.min(stops.length - 2, Math.floor(t / span));
+  return lerpColor(stops[index], stops[index + 1], (t - index * span) / span);
 }
 
-function floorHour(iso) {
+const floorHour = (iso) => {
   const at = new Date(iso);
   at.setUTCMinutes(0, 0, 0);
   return at;
-}
+};
 
 const fmtHour = (at) => at.toISOString();
 const fmtDay = (at) => at.toISOString().slice(0, 10);
 const fmtLabel = (at) => at.toUTCString().slice(0, 22) + " UTC";
 
 function fmtValue(key, value) {
-  if (value === null || value === undefined || value === "") return "—";
-  if (Array.isArray(value)) return value.join(", ");
-  if (PERCENT.has(key)) return (value * 100).toFixed(1) + " %";
-  if (PRECISE.has(key)) return Number(value).toPrecision(3);
-  if (key in DIRECTION_SENSE) return `${DIRECTION_SENSE[key]} ${Math.round(value)}°`;
-  if (typeof value === "number") {
-    return Math.round(value * 100) / 100 + (UNITS[key] || "");
-  }
-  return String(value);
+  if (value === null || value === undefined || value === "") return "–";
+  if (typeof value === "boolean") return value ? "yes" : "no";
+  if (typeof value !== "number") return String(value);
+  if (PERCENT.has(key)) return (value * 100).toFixed(3) + " %";
+  const unit = UNITS[key] ? ` ${UNITS[key]}` : "";
+  if (PRECISE.has(key)) return value.toPrecision(3) + unit;
+  return (Math.abs(value) >= 100 ? value.toFixed(0) : value.toFixed(2)) + unit;
 }
 
 function escapeHtml(value) {
-  return String(value)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
+  return String(value).replace(
+    /[&<>"']/g,
+    (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]
+  );
 }
 
 function popupHtml(layerId, props) {
-  const title = LAYERS.find((layer) => layer.id === layerId).label;
-  const rows = Object.entries(props)
-    .filter(([, value]) => value !== null && value !== undefined && value !== "")
+  const fields = POPUP_FIELDS[layerId] ?? Object.keys(props);
+  const rows = fields
+    .filter((key) => props[key] !== undefined)
     .map(
-      ([key, value]) =>
-        `<tr><th>${escapeHtml(FIELD_LABELS[key] || key)}</th>` +
-        `<td>${escapeHtml(fmtValue(key, value))}</td></tr>`
+      (key) =>
+        `<tr><th>${escapeHtml(FIELD_LABELS[key] ?? key)}</th>` +
+        `<td>${escapeHtml(fmtValue(key, props[key]))}</td></tr>`
     )
     .join("");
-  return `<div class="popup"><h4>${title}</h4><table>${rows}</table></div>`;
+  return `<table class="popup">${rows}</table>`;
 }
 
 function toFeatureCollection(rows) {
@@ -217,17 +178,7 @@ function toFeatureCollection(rows) {
   };
 }
 
-function conditionRows(rows, layer) {
-  return rows
-    .filter((row) => row[layer.speed] !== null && row[layer.direction] !== null)
-    .map((row) => {
-      const picked = { lat: row.lat, lon: row.lon, sources: row.sources };
-      for (const field of layer.fields) picked[field] = row[field];
-      return picked;
-    });
-}
-
-function arrowImage(color, thick) {
+function arrowImage(color) {
   const size = 40;
   const canvas = document.createElement("canvas");
   canvas.width = canvas.height = size;
@@ -235,35 +186,22 @@ function arrowImage(color, thick) {
   ctx.translate(size / 2, size / 2);
   ctx.fillStyle = color;
   ctx.strokeStyle = color;
-  ctx.lineWidth = thick ? 7 : 4;
+  ctx.lineWidth = 4;
   ctx.lineCap = "round";
-  const tail = thick ? 8 : 13;
-  const head = thick ? 6 : 8;
   ctx.beginPath();
-  ctx.moveTo(0, tail);
-  ctx.lineTo(0, -tail + head);
+  ctx.moveTo(0, 13);
+  ctx.lineTo(0, -5);
   ctx.stroke();
   ctx.beginPath();
-  ctx.moveTo(0, -tail);
-  ctx.lineTo(-head, -tail + head);
-  ctx.lineTo(head, -tail + head);
+  ctx.moveTo(0, -13);
+  ctx.lineTo(-8, -5);
+  ctx.lineTo(8, -5);
   ctx.closePath();
   ctx.fill();
   ctx.strokeStyle = "rgba(255,255,255,0.55)";
   ctx.lineWidth = 1;
   ctx.stroke();
   return ctx.getImageData(0, 0, size, size);
-}
-
-function registerArrows(map) {
-  for (const layer of CONDITION_LAYERS) {
-    for (let i = 0; i < RAMP_STEPS; i++) {
-      map.addImage(
-        `${layer.id}-${i}`,
-        arrowImage(rampColor(layer.stops, i / (RAMP_STEPS - 1)), layer.thick)
-      );
-    }
-  }
 }
 
 function iconImageExpression(layer) {
@@ -275,10 +213,9 @@ function iconImageExpression(layer) {
 }
 
 function rampExpression(layer) {
-  const top = layer.domain;
   const expression = ["interpolate", ["linear"], ["get", layer.property]];
   for (let i = 0; i < layer.stops.length; i++) {
-    expression.push((top * i) / (layer.stops.length - 1), layer.stops[i]);
+    expression.push((layer.domain * i) / (layer.stops.length - 1), layer.stops[i]);
   }
   return expression;
 }
@@ -298,7 +235,7 @@ const jump = document.getElementById("jump");
 let selectedTick = null;
 let hours = [];
 let pendingHour = 0;
-const hidden = new Set();
+const hidden = new Set(["sea"]);
 
 function bindPopup(id) {
   map.on("click", id, (event) => {
@@ -313,47 +250,47 @@ function bindPopup(id) {
 
 function addLayer(layer, spec) {
   map.addSource(layer.id, { type: "geojson", data: EMPTY });
-  map.addLayer({ id: layer.id, source: layer.id, ...spec });
+  map.addLayer({
+    id: layer.id,
+    source: layer.id,
+    ...spec,
+    layout: {
+      ...(spec.layout ?? {}),
+      visibility: hidden.has(layer.id) ? "none" : "visible",
+    },
+  });
   bindPopup(layer.id);
 }
 
-function addArrowLayer(layer) {
-  addLayer(layer, {
+function addRiskLayer() {
+  addLayer(RISK, {
+    type: "line",
+    layout: { "line-cap": "round", "line-join": "round" },
+    paint: {
+      "line-color": rampExpression(RISK),
+      "line-width": ["interpolate", ["linear"], ["zoom"], 5, 3, 11, 9],
+      "line-opacity": 0.9,
+    },
+  });
+}
+
+function addSeaLayer() {
+  addLayer(SEA, {
     type: "symbol",
     layout: {
-      "icon-image": iconImageExpression(layer),
-      "icon-rotate": layer.from
-        ? ["+", ["get", layer.direction], 180]
-        : ["get", layer.direction],
+      "icon-image": iconImageExpression(SEA),
+      "icon-rotate": ["get", SEA.direction],
       "icon-rotation-alignment": "map",
       "icon-allow-overlap": true,
       "icon-ignore-placement": true,
       "icon-size": [
-        "interpolate",
-        ["linear"],
-        ["get", layer.speed],
-        0,
-        0.45,
-        layer.max,
-        1.0,
+        "interpolate", ["linear"], ["get", SEA.speed], 0, 0.45, SEA.max, 1.0,
       ],
     },
   });
 }
 
-function addSegmentLayer(layer) {
-  addLayer(layer, {
-    type: "line",
-    layout: { "line-cap": "round", "line-join": "round" },
-    paint: {
-      "line-color": rampExpression(layer),
-      "line-width": layer.width,
-      "line-opacity": layer.opacity,
-    },
-  });
-}
-
-function addCircleLayer(layer) {
+function addPointLayer(layer) {
   addLayer(layer, {
     type: "circle",
     paint: {
@@ -369,7 +306,7 @@ function addCircleLayer(layer) {
 function renderLegend(counts, notes = {}) {
   legend.innerHTML = LAYERS.map(
     (layer) =>
-      `<label class="legend-row"${notes[layer.id] ? ` title="${notes[layer.id]}"` : ""}>` +
+      `<label class="legend-row"${notes[layer.id] ? ` title="${escapeHtml(notes[layer.id])}"` : ""}>` +
       `<input type="checkbox" data-layer="${layer.id}"` +
       `${hidden.has(layer.id) ? "" : " checked"}>` +
       `<span class="dot" style="background:${layer.color}"></span>${layer.label}` +
@@ -389,36 +326,21 @@ const fetchJson = (url) => fetch(url).then((response) => response.json());
 
 async function snapshot(hour) {
   const at = encodeURIComponent(fmtHour(hour));
+  const day = fmtDay(hour);
   const [conditions, vessels, strandings, risk] = await Promise.all([
     fetchJson(`/api/conditions?at=${at}`),
     fetchJson(`/api/vessels?at=${at}`),
-    fetchJson(`/api/strandings?day=${fmtDay(hour)}`),
-    fetchJson(`/api/risk?at=${at}`),
+    fetchJson(`/api/strandings?day=${day}`),
+    fetchJson(`/api/risk?day=${day}`),
   ]);
   return { conditions, vessels, strandings, risk };
 }
 
-function riskNotes(risk) {
-  const expected = risk.release_days_expected;
-  const missing = risk.missing_release_days ?? [];
-  const provisional = risk.provisional_release_days ?? [];
+function riskNote(risk) {
   const forecast = (risk.features ?? []).some(
-    (feature) => feature.properties.source === "forecast",
+    (feature) => feature.properties.source === "forecast"
   );
-  const parts = [];
-  if (forecast) parts.push("computed from forecast conditions");
-  if (missing.length)
-    parts.push(
-      `${missing.length} of ${expected} release days not simulated yet ` +
-        `(${missing[0]} → ${missing[missing.length - 1]})`,
-    );
-  if (provisional.length)
-    parts.push(
-      `${provisional.length} of ${expected} release days still run on forecast ` +
-        `conditions (${provisional[0]} → ${provisional[provisional.length - 1]})`,
-    );
-  if (!parts.length) return {};
-  return { risk: `Partial: ${parts.join("; ")}` };
+  return forecast ? { risk: "Computed from forecast conditions" } : {};
 }
 
 function toggleDayExpanded(dayEl) {
@@ -502,31 +424,33 @@ async function selectHour(hour, tick) {
   const data = await snapshot(hour);
   if (request !== pendingHour) return;
 
-  const counts = {
-    vessels: data.vessels.length,
-    strandings: data.strandings.length,
-  };
-  for (const layer of SEGMENT_LAYERS) {
-    const collection = data[layer.id];
-    map.getSource(layer.id).setData(collection);
-    counts[layer.id] = collection.features.length;
-  }
-  for (const layer of CONDITION_LAYERS) {
-    const rows = conditionRows(data.conditions, layer);
-    map.getSource(layer.id).setData(toFeatureCollection(rows));
-    counts[layer.id] = rows.length;
-  }
-  for (const layer of POINT_LAYERS) {
+  map.getSource(RISK.id).setData(data.risk);
+  const sea = data.conditions.filter(
+    (row) => row[SEA.speed] !== null && row[SEA.direction] !== null
+  );
+  map.getSource(SEA.id).setData(toFeatureCollection(sea));
+  for (const layer of POINTS) {
     map.getSource(layer.id).setData(toFeatureCollection(data[layer.id]));
   }
-  renderLegend(counts, riskNotes(data.risk));
+
+  renderLegend(
+    {
+      risk: data.risk.features.length,
+      sea: sea.length,
+      vessels: data.vessels.length,
+      strandings: data.strandings.length,
+    },
+    riskNote(data.risk)
+  );
 }
 
 map.on("load", async () => {
-  registerArrows(map);
-  SEGMENT_LAYERS.forEach(addSegmentLayer);
-  CONDITION_LAYERS.forEach(addArrowLayer);
-  POINT_LAYERS.forEach(addCircleLayer);
+  for (let i = 0; i < RAMP_STEPS; i++) {
+    map.addImage(`${SEA.id}-${i}`, arrowImage(rampColor(SEA.stops, i / (RAMP_STEPS - 1))));
+  }
+  addRiskLayer();
+  addSeaLayer();
+  POINTS.forEach(addPointLayer);
   renderLegend({});
 
   const range = await fetchJson("/api/range");

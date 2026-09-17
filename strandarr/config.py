@@ -13,13 +13,11 @@ class Settings(BaseSettings):
     gfw_api_token: str = ""
     aisstream_api_key: str = ""
 
-    marine_forecast_hours: int = 48
+    forecast_hours: int = 72
 
     grid_step_deg: float = 0.25
 
     max_distance_to_coast_km: float = 200.0
-
-    coastal_land_margin_km: float = 30.0
 
     @property
     def database_url(self) -> str:

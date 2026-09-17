@@ -1,14 +1,26 @@
+import logging
 import math
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import pairwise
 from typing import Any
 
+import numpy as np
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from strandarr.analysis import Float, Int
 from strandarr.config import settings
+from strandarr.models import CoastalSegment
+
+logger = logging.getLogger(__name__)
 
 EARTH_RADIUS_KM = 6371.0088
+KM_PER_LAT_DEG = 110.6
+KM_PER_LON_DEG = 111.3
 
 Point = tuple[float, float]
+Path = list[list[float]]
 
 
 @dataclass(frozen=True)
@@ -74,8 +86,40 @@ def densify(line: list[Point], spacing_km: float) -> Iterator[Point]:
         yield end
 
 
+BBOX = BBox(-6.0, 42.0, 9.5, 51.5)
+
+COORD_DECIMALS = 4
+
+
+@dataclass(frozen=True)
+class Grid:
+    bbox: BBox
+    step_deg: float
+
+    def cell(self, lat: float, lon: float) -> Point:
+        return round(lat, COORD_DECIMALS), round(lon, COORD_DECIMALS)
+
+    def axes(self) -> tuple[list[float], list[float]]:
+        min_lon, min_lat, max_lon, max_lat = self.bbox.corners()
+        rows = round((max_lat - min_lat) / self.step_deg) + 1
+        columns = round((max_lon - min_lon) / self.step_deg) + 1
+        return (
+            [min_lat + row * self.step_deg for row in range(rows)],
+            [min_lon + column * self.step_deg for column in range(columns)],
+        )
+
+    def points(self) -> list[Point]:
+        lats, lons = self.axes()
+        return [self.cell(lat, lon) for lat in lats for lon in lons]
+
+
+GRID = Grid(BBOX, settings.grid_step_deg)
+
+TILE_DEG = 0.5
+
+
 class NearestIndex:
-    def __init__(self, points: Iterable[Point], tile_deg: float = 0.5):
+    def __init__(self, points: Iterable[Point], tile_deg: float = TILE_DEG) -> None:
         self.tile_deg = tile_deg
         self.tiles: dict[tuple[int, int], list[Point]] = {}
         self.size = 0
@@ -116,31 +160,155 @@ def _ring_tiles(center: tuple[int, int], ring: int) -> Iterator[tuple[int, int]]
         yield row + offset, column + ring
 
 
-BBOX = BBox(-6.0, 42.0, 9.5, 51.5)
+def shore_index(segments: "SegmentIndex") -> NearestIndex:
+    return NearestIndex(
+        (lat, lon)
+        for position in range(len(segments))
+        for lon, lat in segments.geometry(position)
+    )
 
-COORD_DECIMALS = 4
+
+_points: dict[tuple[int, ...], list[Point]] = {}
+
+
+def grid_points(segments: "SegmentIndex") -> list[Point]:
+    cached = _points.get(segments.ids)
+    if cached is None:
+        cached = sampled_points(shore_index(segments))
+        _points.clear()
+        _points[segments.ids] = cached
+    return cached
+
+
+def sampled_points(index: NearestIndex) -> list[Point]:
+    limit = settings.max_distance_to_coast_km
+    points = [
+        point for point in GRID.points() if index.distance_km(point, limit) is not None
+    ]
+    logger.info(
+        "grid: %d of %d cells within %.0f km of shore",
+        len(points),
+        len(GRID.points()),
+        limit,
+    )
+    return points
 
 
 @dataclass(frozen=True)
-class Grid:
-    bbox: BBox
-    step_deg: float
+class SegmentIndex:
+    ids: tuple[int, ...]
+    lats: Float
+    lons: Float
+    lengths: Float
+    orientations: Float
+    paths: tuple[Path | None, ...]
+    position: Mapping[int, int]
 
-    def cell(self, lat: float, lon: float) -> Point:
-        return round(lat, COORD_DECIMALS), round(lon, COORD_DECIMALS)
-
-    def axes(self) -> tuple[list[float], list[float]]:
-        min_lon, min_lat, max_lon, max_lat = self.bbox.corners()
-        rows = round((max_lat - min_lat) / self.step_deg) + 1
-        columns = round((max_lon - min_lon) / self.step_deg) + 1
-        return (
-            [min_lat + row * self.step_deg for row in range(rows)],
-            [min_lon + column * self.step_deg for column in range(columns)],
+    @classmethod
+    def of(cls, rows: Sequence[Any]) -> "SegmentIndex":
+        return cls(
+            ids=tuple(row.id for row in rows),
+            lats=np.array([row.center_lat for row in rows], dtype=np.float64),
+            lons=np.array([row.center_lon for row in rows], dtype=np.float64),
+            lengths=np.array([row.length_km or 0.0 for row in rows], dtype=np.float64),
+            orientations=np.array(
+                [row.orientation_deg or 0.0 for row in rows], dtype=np.float64
+            ),
+            paths=tuple(row.path for row in rows),
+            position={row.id: position for position, row in enumerate(rows)},
         )
 
-    def points(self) -> list[Point]:
-        lats, lons = self.axes()
-        return [self.cell(lat, lon) for lat in lats for lon in lons]
+    def __len__(self) -> int:
+        return len(self.ids)
+
+    def blank(self) -> Float:
+        return np.zeros(len(self), dtype=np.float64)
+
+    def geometry(self, position: int) -> Path:
+        return self.paths[position] or [
+            [float(self.lons[position]), float(self.lats[position])]
+        ]
+
+    def vector(self, by_id: Mapping[int, float]) -> Float:
+        row = self.blank()
+        for segment_id, value in by_id.items():
+            position = self.position.get(segment_id)
+            if position is not None:
+                row[position] = value
+        return row
 
 
-GRID = Grid(BBOX, settings.grid_step_deg)
+RASTER_DEG = 0.02
+
+
+@dataclass(frozen=True)
+class Coast:
+    segment_ids: tuple[int, ...]
+    nearest: Int
+    distance_km: Float
+
+    def lookup(self, lat: Float, lon: Float) -> tuple[Int, Float]:
+        min_lon, min_lat, _, _ = GRID.bbox.corners()
+        rows, columns = self.nearest.shape
+        i = np.clip(np.rint((lat - min_lat) / RASTER_DEG), 0, rows - 1).astype(np.int32)
+        j = np.clip(np.rint((lon - min_lon) / RASTER_DEG), 0, columns - 1).astype(
+            np.int32
+        )
+        return self.nearest[i, j], self.distance_km[i, j]
+
+
+_cache: dict[tuple[tuple[int, ...], float], Coast] = {}
+
+
+def coast(index: SegmentIndex, radius_km: float) -> Coast:
+    cached = _cache.get((index.ids, radius_km))
+    if cached is not None:
+        return cached
+
+    min_lon, min_lat, max_lon, max_lat = GRID.bbox.corners()
+    rows = int((max_lat - min_lat) / RASTER_DEG) + 1
+    columns = int((max_lon - min_lon) / RASTER_DEG) + 1
+    nearest = np.full((rows, columns), -1, dtype=np.int32)
+    distance = np.full((rows, columns), np.inf, dtype=np.float64)
+    lat_axis = min_lat + np.arange(rows, dtype=np.float64) * RASTER_DEG
+    lon_axis = min_lon + np.arange(columns, dtype=np.float64) * RASTER_DEG
+
+    for position in range(len(index)):
+        for lon, lat in index.geometry(position):
+            scale = KM_PER_LON_DEG * math.cos(math.radians(lat))
+            half_lat = radius_km / KM_PER_LAT_DEG
+            half_lon = radius_km / max(1.0, scale)
+            i0 = max(0, int((lat - half_lat - min_lat) / RASTER_DEG))
+            i1 = min(rows, int((lat + half_lat - min_lat) / RASTER_DEG) + 2)
+            j0 = max(0, int((lon - half_lon - min_lon) / RASTER_DEG))
+            j1 = min(columns, int((lon + half_lon - min_lon) / RASTER_DEG) + 2)
+            if i0 >= i1 or j0 >= j1:
+                continue
+            local = np.hypot(
+                (lat_axis[i0:i1] - lat)[:, None] * KM_PER_LAT_DEG,
+                (lon_axis[j0:j1] - lon)[None, :] * scale,
+            )
+            window = distance[i0:i1, j0:j1]
+            closer = local < window
+            window[closer] = local[closer]
+            nearest[i0:i1, j0:j1][closer] = position
+
+    built = Coast(segment_ids=index.ids, nearest=nearest, distance_km=distance)
+    _cache[(index.ids, radius_km)] = built
+    logger.info(
+        "coast raster: %d segment(s), %dx%d cells, %.0f km reach",
+        len(index),
+        rows,
+        columns,
+        radius_km,
+    )
+    return built
+
+
+def load_segments(session: Session) -> SegmentIndex:
+    rows = list(
+        session.execute(select(CoastalSegment).order_by(CoastalSegment.id)).scalars()
+    )
+    if not rows:
+        raise RuntimeError("no coastal segments stored: run `strandarr reference`")
+    return SegmentIndex.of(rows)

@@ -1,8 +1,0 @@
-VESSEL_POSITIONS = "ingest_vessel_positions"
-WEATHER_ARCHIVE = "ingest_weather_archive"
-MARINE_ARCHIVE = "ingest_marine_archive"
-STRANDINGS_GBIF = "ingest_strandings_gbif"
-STRANDINGS_HISTOCARTO = "ingest_strandings_histocarto"
-FORECAST = "ingest_forecast"
-DRIFT_ARRIVALS = "compute_drift_arrivals"
-SEGMENT_RISK = "compute_segment_risk"
