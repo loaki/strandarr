@@ -1,5 +1,6 @@
 import json
 import logging
+import time
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -58,8 +59,6 @@ class Model:
     seasonal_weight: float
     seasonal_baseline: float
     fitted: bool
-    index_breaks: list[float]
-    index_levels: list[float]
 
     @classmethod
     def load(cls) -> "Model":
@@ -75,8 +74,6 @@ class Model:
             seasonal_weight=float(raw["seasonal_weight"]),
             seasonal_baseline=float(raw["seasonal_baseline"]),
             fitted=bool(raw.get("fitted", False)),
-            index_breaks=[float(value) for value in raw.get("index_breaks", ())],
-            index_levels=[float(value) for value in raw.get("index_levels", ())],
         )
 
     def dump(self) -> dict[str, Any]:
@@ -87,8 +84,6 @@ class Model:
             "seasonal_weight": self.seasonal_weight,
             "seasonal_baseline": self.seasonal_baseline,
             "fitted": self.fitted,
-            "index_breaks": self.index_breaks,
-            "index_levels": self.index_levels,
         }
 
     def save(self) -> None:
@@ -117,43 +112,58 @@ def logit(chance: Float) -> Float:
 
 
 INDEX_QUANTILES = 101
-INDEX_FALLBACK_LOW = 1e-4
-INDEX_FALLBACK_HIGH = 0.08
+INDEX_CACHE_SECONDS = 600
+
+_scale: tuple[float, Float, Float] | None = None
 
 
-def index_of(probability: Float, model: Model) -> Float:
-    """Rescale the probability to 0-100 for the map.
+def index_scale(session: Session) -> tuple[Float, Float]:
+    """Breakpoints mapping the stored probabilities onto 0-100.
 
-    A monotone rescale, so the index can never disagree with the model, and a
-    fixed one, so the same colour means the same absolute chance on every day --
-    unlike a per-day share of the peak, which makes a flat-calm day and a storm
-    day look identical. The breakpoints are the probability quantiles frozen by
-    `strandarr fit`; before the first fit a log scale stands in, because the
-    probabilities are skewed enough that a linear one renders everything at zero.
+    Measured from segment_risk rather than pinned to the coefficients, so the
+    scale describes the model that actually produced the numbers on screen and
+    cannot go stale behind a refit. It is the distribution over every stored
+    segment-day, not over the day being drawn: that is what makes the same
+    colour mean the same absolute chance on a calm day and a stormy one.
+    """
+    global _scale
+    now = time.monotonic()
+    if _scale is not None and now - _scale[0] < INDEX_CACHE_SECONDS:
+        return _scale[1], _scale[2]
+
+    shares = np.linspace(0.0, 1.0, INDEX_QUANTILES)
+    measured = session.execute(
+        select(
+            func.percentile_cont(shares.tolist()).within_group(
+                SegmentRisk.probability.asc()
+            )
+        )
+    ).scalar()
+
+    breaks = np.asarray(measured or [], dtype=np.float64)
+    levels = 100.0 * shares
+    if len(breaks) == len(shares):
+        # Flat stretches would repeat a breakpoint and make np.interp pick
+        # arbitrarily between levels, so drop duplicates instead of nudging them.
+        keep = np.concatenate([np.diff(breaks) > 0.0, [True]])
+        breaks, levels = breaks[keep], levels[keep]
+    else:
+        breaks, levels = np.asarray([]), np.asarray([])
+
+    _scale = (now, breaks, levels)
+    return breaks, levels
+
+
+def index_of(probability: Float, breaks: Float, levels: Float) -> Float:
+    """Rescale a probability to 0-100 for the map.
+
+    Monotone, so the index can never disagree with the model, and shared across
+    days, so the colour means the same thing whenever you look at it.
     """
     values = np.asarray(probability, dtype=np.float64)
-    if len(model.index_breaks) >= 2:
-        return np.asarray(np.interp(values, model.index_breaks, model.index_levels))
-    low, high = np.log10(INDEX_FALLBACK_LOW), np.log10(INDEX_FALLBACK_HIGH)
-    scaled = (np.log10(np.clip(values, INDEX_FALLBACK_LOW, None)) - low) / (high - low)
-    return np.asarray(100.0 * np.clip(scaled, 0.0, 1.0))
-
-
-def index_scale(probability: Float) -> tuple[list[float], list[float]]:
-    """Quantile breakpoints mapping the probability distribution onto 0-100.
-
-    Flat stretches of the distribution would repeat a breakpoint, which makes
-    np.interp pick arbitrarily between the levels there, so duplicates are dropped
-    rather than nudged apart -- most of the mass sits at the low end and nudging
-    would distort exactly where it matters.
-    """
-    shares = np.linspace(0.0, 1.0, INDEX_QUANTILES)
-    breaks = np.quantile(np.asarray(probability, dtype=np.float64), shares)
-    keep = np.concatenate([np.diff(breaks) > 0.0, [True]])
-    return (
-        [float(value) for value in breaks[keep]],
-        [float(value) for value in (100.0 * shares)[keep]],
-    )
+    if len(breaks) < 2:
+        return np.zeros_like(values)
+    return np.asarray(np.interp(values, breaks, levels))
 
 
 @dataclass(frozen=True)
@@ -388,7 +398,16 @@ def run(session: Session, day: date) -> int:
 
     raw = signals(session, index, day)
     seasonal = past.climatology.chance(day, len(index))
-    probability = predict(design(raw, seasonal, model), model)
+    if model.fitted:
+        probability = predict(design(raw, seasonal, model), model)
+    else:
+        # The shipped weights were fitted against per-day ranks in [0, 1] and are
+        # meaningless applied to log1p(signal / scale) -- persistence alone can
+        # cancel the intercept and push the probability into the tens of percent.
+        # Until `strandarr fit` has run, report the seasonal climatology, which is
+        # measured from the stranding record, and store the signals so fit has
+        # something to learn from.
+        probability = seasonal
     source = FORECAST if day > date.today() - timedelta(days=LAG_DAYS) else OBSERVED
 
     written = replace(
@@ -413,7 +432,9 @@ def run(session: Session, day: date) -> int:
         day,
         written,
         float(probability.max()) if written else 0.0,
-        "" if model.fitted else " (coefficients not fitted yet, run `strandarr fit`)",
+        ""
+        if model.fitted
+        else " (seasonal climatology only; run `strandarr fit` to use the signals)",
     )
     return written
 
@@ -497,22 +518,8 @@ def fit(session: Session, seed: int = 0) -> Model:
         seasonal_weight=float(beta[-1]),
         seasonal_baseline=past.baseline,
         fitted=True,
-        index_breaks=[],
-        index_levels=[],
     )
 
-    # The map scale has to come from what this model predicts, not from the
-    # probabilities on record, which the previous coefficients produced.
-    everywhere = predict(
-        design(
-            {name: values[:, position] for position, name in enumerate(SIGNALS)},
-            seasonal,
-            model,
-        ),
-        model,
-    )
-    breaks, levels = index_scale(everywhere)
-    model = Model(**{**model.dump(), "index_breaks": breaks, "index_levels": levels})
     model.save()
     logger.info(
         "fit: %d positive(s) and %d sampled negative(s) of %d segment-day(s)",
@@ -526,15 +533,12 @@ def fit(session: Session, seed: int = 0) -> Model:
         )
     logger.info("  %-14s weight %+.4f", "seasonal", model.seasonal_weight)
     logger.info("  %-14s %+.4f", "intercept", model.intercept)
-    logger.info(
-        "  index scale: %d breakpoint(s), probability %.3g at 0 to %.3g at 100",
-        len(breaks),
-        breaks[0] if breaks else 0.0,
-        breaks[-1] if breaks else 0.0,
-    )
 
     # Between-day spread is what makes a calm day look different from a storm.
     # If the model's variation is mostly spatial, no colour scale can create it.
+    columns = [transform(values[:, i], scales[name]) for i, name in enumerate(SIGNALS)]
+    columns.append(logit(seasonal) - past.baseline)
+    everywhere = predict(np.column_stack(columns), model)
     by_day: dict[date, list[float]] = {}
     for row, chance in zip(stored, everywhere, strict=True):
         by_day.setdefault(row[0], []).append(float(chance))

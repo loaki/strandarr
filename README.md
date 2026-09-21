@@ -110,21 +110,31 @@ absolute chance whenever you look. That is the point: a share of the day's peak,
 which is what the map used to show, makes a flat-calm day and a storm day look
 identical.
 
-The breakpoints are the probability quantiles frozen by `strandarr fit` and kept
-in `coefficients.json` next to the weights, so the index is computed at request
-time and no column stores it. Before the first fit a fixed log scale stands in,
-and the map says so.
+The breakpoints are the probability quantiles measured from `segment_risk`
+itself, cached for ten minutes, so the scale always describes the model that
+produced the numbers on screen and cannot go stale behind a refit. The index is
+computed at request time; no column stores it.
 
 Whether a calm day *looks* calm is a property of the model, not of the scale — a
 monotone rescale cannot create contrast that the probabilities do not have. `fit`
 logs the between-day and within-day spread so you can see which dominates.
 
+### Before it is fitted
+
+`coefficients.json` ships **zeroed**, and an unfitted model does not use the
+signals at all: `risk` stores them, but reports the seasonal climatology as the
+probability, and the map says so.
+
+That is deliberate. The obvious alternative — shipping the previous model's
+weights as a starting point — produces nonsense, because those were fitted
+against per-day ranks in `[0, 1]` and this model feeds them `log1p(signal /
+scale)`. With `persistence` at 12.7 that one term contributes `+6.3`, enough to
+cancel the intercept on its own and report a 78% chance of a stranding. A number
+that wrong is worse than no number.
+
 ### Fitting
 
-Coefficients live in `strandarr/coefficients.json` and ship **unfitted** — the
-committed values are carried over from the previous model, whose inputs were
-scaled differently. They are a starting point, not a calibration. After the
-first real backfill:
+After the first real backfill:
 
 ```bash
 strandarr fit                                              # refit from segment_risk + strandings
@@ -133,9 +143,8 @@ strandarr skill                                            # AUC of stored predi
 ```
 
 `fit` writes to `COEFFICIENTS_PATH`, which Compose points at a volume shared by
-the worker and the web service — otherwise a rebuilt image would discard the fit,
-and with it the map's scale. The web service reads the file at start-up, so
-restart it after a refit.
+the worker and the web service — otherwise a rebuilt image would discard the fit.
+The web service reads the file at start-up, so restart it after a refit.
 
 `fit` keeps every segment-day a stranding happened on and samples 20 negatives
 per positive, then corrects the intercept back to the true base rate.

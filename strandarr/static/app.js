@@ -323,18 +323,10 @@ function addRiskLayer() {
     type: "line",
     layout: { "line-cap": "round", "line-join": "round" },
     paint: {
+      // Colour alone carries the index: an even width keeps segments comparable
+      // instead of making a long stretch of coast look more urgent than a short one.
       "line-color": rampExpression(RISK),
-      // Width carries the index too, so a quiet day reads as thin and pale
-      // rather than merely pale.
-      "line-width": [
-        "interpolate",
-        ["linear"],
-        ["zoom"],
-        5,
-        ["interpolate", ["linear"], ["get", RISK.property], 0, 1, RISK.domain, 9],
-        11,
-        ["interpolate", ["linear"], ["get", RISK.property], 0, 2, RISK.domain, 20],
-      ],
+      "line-width": ["interpolate", ["linear"], ["zoom"], 5, 3, 11, 9],
       "line-opacity": 0.9,
     },
   });
@@ -371,19 +363,6 @@ function addPointLayer(layer) {
   });
 }
 
-function riskScaleHtml() {
-  const swatches = [];
-  for (let i = 0; i < 24; i++) {
-    swatches.push(
-      `<i style="background:${rampColor(RISK.stops, i / 23)}"></i>`
-    );
-  }
-  return (
-    `<div class="scale"><div class="bar">${swatches.join("")}</div>` +
-    `<div class="ticks"><span>0</span><span>50</span><span>100</span></div></div>`
-  );
-}
-
 function renderLegend(counts, notes = {}) {
   legend.innerHTML = LAYERS.map(
     (layer) =>
@@ -391,8 +370,7 @@ function renderLegend(counts, notes = {}) {
       `<input type="checkbox" data-layer="${layer.id}"` +
       `${hidden.has(layer.id) ? "" : " checked"}>` +
       `<span class="dot" style="background:${layer.color}"></span>${layer.label}` +
-      `<span class="count">${counts[layer.id] ?? "–"}</span></label>` +
-      (layer.id === RISK.id ? riskScaleHtml() : "")
+      `<span class="count">${counts[layer.id] ?? "–"}</span></label>`
   ).join("");
   legend.querySelectorAll("input[data-layer]").forEach((input) => {
     input.addEventListener("change", () => {
@@ -424,7 +402,10 @@ function riskNote(risk) {
     parts.push("computed from forecast conditions");
   }
   if (risk.fitted === false) {
-    parts.push("coefficients not fitted yet, so the scale is provisional");
+    parts.push(
+      "seasonal climatology only \u2014 the sea-state and drift signals are " +
+        "not in use until the coefficients are fitted"
+    );
   }
   return parts.length ? { risk: parts.join("; ") } : {};
 }

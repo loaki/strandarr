@@ -115,8 +115,9 @@ def get_risk(day: Day, db: Db) -> dict[str, Any]:
         .order_by(SegmentRisk.probability.desc())
     ).all()
 
+    breaks, levels = risk.index_scale(db)
     index = risk.index_of(
-        np.array([float(row[5]) for row in rows], dtype=np.float64), RISK_MODEL
+        np.array([float(row[5]) for row in rows], dtype=np.float64), breaks, levels
     )
     features = [
         {
