@@ -170,18 +170,6 @@ def shore_index(segments: "SegmentIndex") -> NearestIndex:
     )
 
 
-_points: dict[tuple[int, ...], list[Point]] = {}
-
-
-def grid_points(segments: "SegmentIndex") -> list[Point]:
-    cached = _points.get(segments.ids)
-    if cached is None:
-        cached = sampled_points(shore_index(segments))
-        _points.clear()
-        _points[segments.ids] = cached
-    return cached
-
-
 GRID_POINTS_PATH = pathlib.Path(__file__).resolve().parent.parent / "grid_points.json"
 
 
@@ -197,18 +185,34 @@ def stored_points() -> list[Point] | None:
     if not GRID_POINTS_PATH.exists():
         return None
     raw = json.loads(GRID_POINTS_PATH.read_text())
-    return [GRID.cell(float(lat), float(lon)) for lat, lon in raw["points"]]
+    points = [GRID.cell(float(lat), float(lon)) for lat, lon in raw["points"]]
+    logger.info(
+        "grid: %d of %d cells, from %s",
+        len(points),
+        len(GRID.points()),
+        GRID_POINTS_PATH.name,
+    )
+    return points
+
+
+_points: dict[tuple[int, ...], list[Point]] = {}
+
+
+def grid_points(segments: "SegmentIndex") -> list[Point]:
+    cached = _points.get(segments.ids)
+    if cached is None:
+        # Only fall back to measuring distance to the shore, which means indexing
+        # every densified coastline point, when the decided grid is not shipped.
+        cached = stored_points()
+        if cached is None:
+            cached = sampled_points(shore_index(segments))
+        _points.clear()
+        _points[segments.ids] = cached
+    return cached
 
 
 def sampled_points(index: NearestIndex) -> list[Point]:
     total = len(GRID.points())
-    stored = stored_points()
-    if stored is not None:
-        logger.info(
-            "grid: %d of %d cells, from %s", len(stored), total, GRID_POINTS_PATH.name
-        )
-        return stored
-
     limit = settings.max_distance_to_coast_km
     points = [
         point for point in GRID.points() if index.distance_km(point, limit) is not None

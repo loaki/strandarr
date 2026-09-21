@@ -67,6 +67,7 @@ def main() -> int:
     shore = NearestIndex(
         point for line in fetch_lines() for point in densify(line, DENSIFY_KM)
     )
+    logger.info("coastline: %d densified point(s) indexed", shore.size)
     near: dict[Point, float] = {}
     for point in GRID.points():
         distance = shore.distance_km(point, limit)

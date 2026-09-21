@@ -1,6 +1,6 @@
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from typing import Any, cast
+from typing import cast
 
 from sqlalchemy import ColumnExpressionArgument, Table, create_engine, delete
 from sqlalchemy.dialects.postgresql import insert
@@ -75,7 +75,3 @@ def replace(
 ) -> int:
     session.execute(delete(model).where(*scope))
     return upsert(session, model, rows, overwrite=True)
-
-
-def scalars(session: OrmSession, statement: Any) -> list[Any]:
-    return list(session.execute(statement).scalars())

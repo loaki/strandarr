@@ -170,14 +170,17 @@ def get(kind: str) -> Spec:
 def enqueue(session: Session, kind: str, days: list[date]) -> int:
     if not days:
         return 0
+    # RETURNING, not rowcount: a multi-row INSERT with Python-side column defaults
+    # goes through insertmanyvalues, which reports -1 rather than a count.
     statement = (
         insert(Job)
         .values(
             [{"kind": kind, "day": day, "status": JobStatus.PENDING} for day in days]
         )
         .on_conflict_do_nothing(index_elements=["kind", "day"])
+        .returning(Job.id)
     )
-    return cast("CursorResult[Any]", session.execute(statement)).rowcount
+    return len(session.execute(statement).all())
 
 
 def reopen(session: Session, kind: str, since: date, until: date = date.max) -> int:

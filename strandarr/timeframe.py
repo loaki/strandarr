@@ -30,9 +30,6 @@ class DayRange:
             yield day
             day += DAY
 
-    def __contains__(self, day: object) -> bool:
-        return isinstance(day, date) and self.start <= day <= self.end
-
     @classmethod
     def of(cls, day: date, days: int = 1) -> "DayRange":
         return cls(day, day + (days - 1) * DAY)
@@ -46,10 +43,3 @@ class DayRange:
     def clamped(self, first: date, last: date) -> "DayRange | None":
         window = DayRange(max(self.start, first), min(self.end, last))
         return window if window else None
-
-    def chunks(self, size: int) -> Iterator["DayRange"]:
-        cursor = self.start
-        while cursor <= self.end:
-            last = min(self.end, cursor + (size - 1) * DAY)
-            yield DayRange(cursor, last)
-            cursor = last + DAY

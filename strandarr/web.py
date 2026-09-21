@@ -60,20 +60,7 @@ STRANDING_FIELDS = (
     "external_id",
 )
 
-SEA_STATE_FIELDS = (
-    "wave_height_m",
-    "wave_direction_deg",
-    "wave_period_s",
-    "swell_height_m",
-    "swell_direction_deg",
-    "swell_period_s",
-    "wind_speed_kmh",
-    "wind_direction_deg",
-    "current_speed_kmh",
-    "current_direction_deg",
-    "sea_surface_temperature_c",
-    "sea_level_m",
-)
+SEA_STATE_FIELDS = Condition.MEASUREMENTS
 
 app = FastAPI(title="strandarr")
 

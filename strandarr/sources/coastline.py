@@ -9,10 +9,8 @@ from sqlalchemy.orm import Session
 
 from strandarr.analysis.geo import (
     GRID,
-    NearestIndex,
     Point,
     bearing_deg,
-    densify,
     distance_km,
 )
 from strandarr.db import upsert
@@ -50,12 +48,6 @@ def fetch_lines() -> list[list[Point]]:
     ]
     logger.info("coastline: %d line(s) near the region", len(lines))
     return lines
-
-
-def nearest_index(lines: list[list[Point]]) -> NearestIndex:
-    index = NearestIndex(point for line in lines for point in densify(line, DENSIFY_KM))
-    logger.info("coastline: %d densified point(s) indexed", index.size)
-    return index
 
 
 def _lines(geometry: dict[str, Any]) -> Iterator[list[Point]]:
