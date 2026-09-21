@@ -110,10 +110,17 @@ absolute chance whenever you look. That is the point: a share of the day's peak,
 which is what the map used to show, makes a flat-calm day and a storm day look
 identical.
 
-The breakpoints are the probability quantiles measured from `segment_risk`
-itself, cached for ten minutes, so the scale always describes the model that
-produced the numbers on screen and cannot go stale behind a refit. The index is
-computed at request time; no column stores it.
+The scale is anchored to `segment_risk` itself, cached for ten minutes: the
+median stored probability is 0 and the 99.9th percentile is 100, log-spaced
+between them. So an ordinary segment-day reads 0 and only a genuinely elevated
+one climbs. Ranking within the distribution instead would spread segment-days
+evenly over 0-100 by construction, and a quiet day on an ordinary stretch of
+coast would report something like 74 purely for being above the median.
+
+Measuring the anchors from the data rather than pinning them to the coefficients
+means the scale always describes the model that produced the numbers on screen,
+and cannot go stale behind a refit. The index is computed at request time; no
+column stores it.
 
 Whether a calm day *looks* calm is a property of the model, not of the scale — a
 monotone rescale cannot create contrast that the probabilities do not have. `fit`
@@ -124,6 +131,10 @@ logs the between-day and within-day spread so you can see which dominates.
 `coefficients.json` ships **zeroed**, and an unfitted model does not use the
 signals at all: `risk` stores them, but reports the seasonal climatology as the
 probability, and the map says so.
+
+Until then the index answers "how strand-prone is this stretch of coast, for the
+time of year" — not "how bad is today". The weather cannot move it, because
+nothing has been calibrated to say by how much.
 
 That is deliberate. The obvious alternative — shipping the previous model's
 weights as a starting point — produces nonsense, because those were fitted

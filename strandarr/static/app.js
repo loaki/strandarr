@@ -199,7 +199,12 @@ function escapeHtml(value) {
 }
 
 function popupHtml(layerId, props) {
-  const fields = POPUP_FIELDS[layerId] ?? Object.keys(props);
+  let fields = POPUP_FIELDS[layerId] ?? Object.keys(props);
+  if (layerId === RISK.id && !riskFitted) {
+    // Unfitted, the probability IS the seasonal baseline. Showing the same
+    // number twice under two names reads like a coincidence rather than a state.
+    fields = fields.filter((key) => key !== "probability");
+  }
   const rows = fields
     .filter((key) => props[key] !== undefined)
     .map(
@@ -288,6 +293,7 @@ const legend = document.getElementById("legend");
 const track = document.getElementById("track");
 const jump = document.getElementById("jump");
 
+let riskFitted = true;
 let selectedTick = null;
 let hours = [];
 let pendingHour = 0;
@@ -491,6 +497,7 @@ async function selectHour(hour, tick) {
   const data = await snapshot(hour);
   if (request !== pendingHour) return;
 
+  riskFitted = data.risk.fitted !== false;
   map.getSource(RISK.id).setData(data.risk);
   const counts = { risk: data.risk.features.length };
   for (const layer of CONDITIONS) {

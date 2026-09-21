@@ -111,59 +111,59 @@ def logit(chance: Float) -> Float:
     return np.asarray(np.log(safe / (1.0 - safe)))
 
 
-INDEX_QUANTILES = 101
+# Ordinary sits at the bottom of the scale and the worst on record at the top.
+# Ranking within the distribution instead would spread segment-days evenly over
+# 0-100 by construction, so a quiet day on an ordinary stretch of coast would
+# report something like 74 purely for being above the median.
+INDEX_LOW_QUANTILE = 0.5
+INDEX_HIGH_QUANTILE = 0.999
 INDEX_CACHE_SECONDS = 600
+INDEX_FLOOR = 1e-9
 
-_scale: tuple[float, Float, Float] | None = None
+_scale: tuple[float, float, float] | None = None
 
 
-def index_scale(session: Session) -> tuple[Float, Float]:
-    """Breakpoints mapping the stored probabilities onto 0-100.
+def index_scale(session: Session) -> tuple[float, float]:
+    """The probabilities that anchor 0 and 100 on the map.
 
     Measured from segment_risk rather than pinned to the coefficients, so the
     scale describes the model that actually produced the numbers on screen and
-    cannot go stale behind a refit. It is the distribution over every stored
-    segment-day, not over the day being drawn: that is what makes the same
-    colour mean the same absolute chance on a calm day and a stormy one.
+    cannot go stale behind a refit. It spans every stored segment-day, not the
+    day being drawn: that is what makes the same colour mean the same absolute
+    chance on a calm day and a stormy one.
     """
     global _scale
     now = time.monotonic()
     if _scale is not None and now - _scale[0] < INDEX_CACHE_SECONDS:
         return _scale[1], _scale[2]
 
-    shares = np.linspace(0.0, 1.0, INDEX_QUANTILES)
-    measured = session.execute(
+    low, high = session.execute(
         select(
-            func.percentile_cont(shares.tolist()).within_group(
+            func.percentile_cont(INDEX_LOW_QUANTILE).within_group(
                 SegmentRisk.probability.asc()
-            )
+            ),
+            func.percentile_cont(INDEX_HIGH_QUANTILE).within_group(
+                SegmentRisk.probability.asc()
+            ),
         )
-    ).scalar()
-
-    breaks = np.asarray(measured or [], dtype=np.float64)
-    levels = 100.0 * shares
-    if len(breaks) == len(shares):
-        # Flat stretches would repeat a breakpoint and make np.interp pick
-        # arbitrarily between levels, so drop duplicates instead of nudging them.
-        keep = np.concatenate([np.diff(breaks) > 0.0, [True]])
-        breaks, levels = breaks[keep], levels[keep]
-    else:
-        breaks, levels = np.asarray([]), np.asarray([])
-
-    _scale = (now, breaks, levels)
-    return breaks, levels
+    ).one()
+    _scale = (now, float(low or 0.0), float(high or 0.0))
+    return _scale[1], _scale[2]
 
 
-def index_of(probability: Float, breaks: Float, levels: Float) -> Float:
+def index_of(probability: Float, low: float, high: float) -> Float:
     """Rescale a probability to 0-100 for the map.
 
-    Monotone, so the index can never disagree with the model, and shared across
-    days, so the colour means the same thing whenever you look at it.
+    Log-spaced, because the probabilities span orders of magnitude and a linear
+    scale would leave everything but the extremes at zero. Monotone, so the index
+    can never disagree with the model.
     """
     values = np.asarray(probability, dtype=np.float64)
-    if len(breaks) < 2:
+    if not high > low > 0.0:
         return np.zeros_like(values)
-    return np.asarray(np.interp(values, breaks, levels))
+    span = np.log(high) - np.log(low)
+    scaled = (np.log(np.clip(values, INDEX_FLOOR, None)) - np.log(low)) / span
+    return np.asarray(100.0 * np.clip(scaled, 0.0, 1.0))
 
 
 @dataclass(frozen=True)
@@ -311,11 +311,23 @@ def sea_state(session: Session, index: SegmentIndex, day: date) -> dict[str, Flo
             func.avg(wave * func.sin(heading)),
             func.avg(wave * func.cos(heading)),
         )
-        .where(Condition.valid_at >= start, Condition.valid_at < end)
+        .where(
+            Condition.valid_at >= start,
+            Condition.valid_at < end,
+            # Marine cells only. condition holds one row per cell-hour with wind
+            # and sea state side by side, so a day the weather archive has reached
+            # but the marine archive has not still returns rows -- and averaging
+            # their NULLs as zero would score the day against a flat calm that
+            # never happened.
+            Condition.wave_height_m.isnot(None),
+        )
         .group_by(Condition.lat, Condition.lon)
     ).all()
     if not rows:
-        raise NotReady(f"no conditions stored for {seen}, needed to score {day}")
+        raise NotReady(
+            f"no sea state stored for {seen}, needed to score {day}: "
+            "the marine archive has not reached that day"
+        )
 
     kernel = spatial_weights(
         index,
