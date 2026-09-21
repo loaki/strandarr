@@ -19,6 +19,12 @@ class Settings(BaseSettings):
 
     max_distance_to_coast_km: float = 200.0
 
+    coastal_land_margin_km: float = 30.0
+
+    # Where `strandarr fit` writes. Left empty it writes inside the package,
+    # which a rebuilt image throws away -- point it at a volume to keep a fit.
+    coefficients_path: str = ""
+
     @property
     def database_url(self) -> str:
         return (

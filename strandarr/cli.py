@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from strandarr import jobs, log
 from strandarr.analysis import risk
 from strandarr.db import unit_of_work
-from strandarr.models import Job, JobStatus
+from strandarr.models import Job, JobStatus, utc_now
 from strandarr.sources import aisstream, coastline
 
 Run = Callable[[argparse.Namespace], None]
@@ -44,10 +44,24 @@ def _schedule_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--end", type=_date, metavar="YYYY-MM-DD", help="last day to cover"
     )
+    parser.add_argument(
+        "--kind",
+        action="append",
+        choices=sorted(jobs.TASKS),
+        help="only this kind (repeatable; default: every kind)",
+    )
+    parser.add_argument(
+        "--redo",
+        action="store_true",
+        help="re-open days already done, so they are computed again. Use after "
+        "`strandarr fit` to apply new coefficients to stored days",
+    )
 
 
 def _schedule(session: Session, args: argparse.Namespace) -> None:
-    jobs.schedule(session, start=args.start, end=args.end)
+    jobs.schedule(
+        session, start=args.start, end=args.end, redo=args.redo, kinds=args.kind
+    )
 
 
 def _retry_args(parser: argparse.ArgumentParser) -> None:
@@ -85,6 +99,14 @@ def _status(session: Session, args: argparse.Namespace) -> None:
         first, last = span[kind]
         print(f"{kind:<20}{line}  {first}..{last}")
 
+    waiting = session.execute(
+        select(Job.kind, func.count(), func.max(Job.deferrals))
+        .where(Job.status == JobStatus.PENDING, Job.not_before > utc_now())
+        .group_by(Job.kind)
+    ).all()
+    for kind, count, deepest in waiting:
+        print(f"  waiting on inputs: {kind} x{count} (deferred up to {deepest}x)")
+
     stuck = session.execute(
         select(Job.kind, Job.day, Job.error)
         .where(Job.status == JobStatus.FAILED)
@@ -92,7 +114,8 @@ def _status(session: Session, args: argparse.Namespace) -> None:
         .limit(5)
     ).all()
     for kind, day, error in stuck:
-        print(f"  failed {kind} {day}: {(error or '').splitlines()[:1]}")
+        first = (error or "").splitlines()
+        print(f"  failed {kind} {day}: {first[0] if first else '-'}")
 
 
 def _reference(session: Session, args: argparse.Namespace) -> None:
@@ -102,7 +125,10 @@ def _reference(session: Session, args: argparse.Namespace) -> None:
 def _fit(session: Session, args: argparse.Namespace) -> None:
     risk.fit(session)
     print(f"wrote {risk.COEFFICIENTS_PATH}")
-    print("re-run the risk jobs to apply it: strandarr schedule --start <first day>")
+    print(
+        "apply it to the stored days: "
+        "strandarr schedule --start <first day> --kind risk --redo"
+    )
 
 
 def _skill(session: Session, args: argparse.Namespace) -> None:

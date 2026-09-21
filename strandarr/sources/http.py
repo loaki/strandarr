@@ -1,10 +1,14 @@
 import logging
 import random
+import re
 import time
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
+
+from strandarr.timeframe import midnight
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +29,11 @@ BUDGETS: dict[str, tuple[tuple[float, int], ...]] = {
     "gateway.api.globalfishingwatch.org": ((MINUTE, 30),),
 }
 
+# Open-Meteo answers a spent hourly/daily/monthly allowance with 429 and says so
+# in the body. Retrying inside the same window can only fail, so the whole host
+# is parked until the window rolls over.
+_SPENT_QUOTA = re.compile(r"\b(hourly|daily|monthly)\b", re.IGNORECASE)
+
 
 def backoff(
     attempt: int, base: float = BACKOFF_SECONDS, cap: float = MAX_BACKOFF_SECONDS
@@ -33,10 +42,42 @@ def backoff(
     return delay * (0.5 + random.random() / 2)
 
 
+class QuotaExhausted(RuntimeError):
+    def __init__(self, host: str, reason: str, retry_at: datetime) -> None:
+        super().__init__(f"{host}: {reason}")
+        self.retry_at = retry_at
+
+
+def _spent_until(reason: str, now: datetime) -> datetime | None:
+    spent = _SPENT_QUOTA.search(reason)
+    if spent is None:
+        return None
+    window = spent.group(1).lower()
+    if window == "hourly":
+        return now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    if window == "monthly":
+        return midnight((now.date().replace(day=1) + timedelta(days=31)).replace(day=1))
+    return midnight(now.date() + timedelta(days=1))
+
+
 class Throttle:
     def __init__(self, budgets: dict[str, tuple[tuple[float, int], ...]]) -> None:
         self.budgets = budgets
         self.sent_at: dict[str, float] = {}
+        self.blocked: dict[str, tuple[datetime, str]] = {}
+
+    def guard(self, host: str) -> None:
+        blocked = self.blocked.get(host)
+        if blocked is None:
+            return
+        retry_at, reason = blocked
+        if retry_at > datetime.now(UTC):
+            raise QuotaExhausted(host, reason, retry_at)
+        del self.blocked[host]
+
+    def block(self, host: str, reason: str, until: datetime) -> QuotaExhausted:
+        self.blocked[host] = (until, reason)
+        return QuotaExhausted(host, reason, until)
 
     def wait(self, host: str, cost: int) -> None:
         budgets = self.budgets.get(host)
@@ -72,6 +113,7 @@ def request(
     client: httpx.Client, method: str, url: str, cost: int = 1, **kwargs: Any
 ) -> httpx.Response:
     host = urlsplit(url).hostname or ""
+    throttle.guard(host)
     for attempt in range(1, MAX_ATTEMPTS + 1):
         last = attempt == MAX_ATTEMPTS
         throttle.wait(host, cost)
@@ -95,6 +137,13 @@ def request(
                 response.raise_for_status()
                 return response
             reason = _reason(response)
+            spent = (
+                _spent_until(reason, datetime.now(UTC))
+                if response.status_code == 429
+                else None
+            )
+            if spent is not None:
+                raise throttle.block(host, reason, spent)
             delay = _retry_after(response) or backoff(attempt)
             logger.warning(
                 "%s %s returned %d%s, attempt %d/%d, waiting %.0fs",

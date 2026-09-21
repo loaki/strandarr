@@ -1,8 +1,8 @@
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, cast
 
 from sqlalchemy import CursorResult, case, or_, select, update
@@ -18,11 +18,15 @@ from strandarr.db import unit_of_work
 from strandarr.errors import NotReady
 from strandarr.models import Job, JobStatus, utc_now
 from strandarr.sources import gfw, meteo, strandings
+from strandarr.sources.http import QuotaExhausted
 from strandarr.timeframe import DayRange
 
 logger = logging.getLogger(__name__)
 
 MAX_ATTEMPTS = 3
+# A deferral is not a failure -- the inputs simply are not there yet -- but a day
+# whose inputs never arrive must not re-queue itself for ever.
+MAX_DEFERRALS = 168
 RETRY_DELAY = timedelta(minutes=1)
 NOT_READY_DELAY = timedelta(hours=1)
 POLL_SECONDS = 5
@@ -40,6 +44,12 @@ GFW_FIRST_DAY = date(2012, 1, 1)
 
 GFW_LAG_DAYS = 4
 ARCHIVE_LAG_DAYS = 5
+
+# A chunked job is enqueued as soon as any of its days is inside the horizon, and
+# it ingests only the days available when it runs. Without re-opening, the trailing
+# chunk would stay partial for ever: re-open it until the whole chunk has aged past
+# the lag.
+ARCHIVE_VOLATILE_DAYS = meteo.DAYS_PER_REQUEST + ARCHIVE_LAG_DAYS
 
 Handler = Callable[[Session, DayRange], int]
 
@@ -108,12 +118,14 @@ TASKS: dict[str, Spec] = {
         first=ERA5_FIRST_DAY,
         lag=ARCHIVE_LAG_DAYS,
         chunk=meteo.DAYS_PER_REQUEST,
+        volatile=ARCHIVE_VOLATILE_DAYS,
     ),
     "marine_archive": Spec(
         run=_archive(meteo.MARINE_ARCHIVE),
         first=MARINE_FIRST_DAY,
         lag=ARCHIVE_LAG_DAYS,
         chunk=meteo.DAYS_PER_REQUEST,
+        volatile=ARCHIVE_VOLATILE_DAYS,
     ),
     "forecast": Spec(run=_forecast, rolling=True, volatile=1),
     "strandings_gbif": Spec(
@@ -168,7 +180,7 @@ def enqueue(session: Session, kind: str, days: list[date]) -> int:
     return cast("CursorResult[Any]", session.execute(statement)).rowcount
 
 
-def reopen(session: Session, kind: str, since: date) -> int:
+def reopen(session: Session, kind: str, since: date, until: date = date.max) -> int:
     return cast(
         "CursorResult[Any]",
         session.execute(
@@ -176,11 +188,13 @@ def reopen(session: Session, kind: str, since: date) -> int:
             .where(
                 Job.kind == kind,
                 Job.day >= since,
+                Job.day <= until,
                 Job.status.in_((JobStatus.DONE, JobStatus.FAILED)),
             )
             .values(
                 status=JobStatus.PENDING,
                 attempts=0,
+                deferrals=0,
                 error=None,
                 not_before=None,
                 started_at=None,
@@ -191,7 +205,11 @@ def reopen(session: Session, kind: str, since: date) -> int:
 
 
 def schedule(
-    session: Session, start: date | None = None, end: date | None = None
+    session: Session,
+    start: date | None = None,
+    end: date | None = None,
+    redo: bool = False,
+    kinds: Sequence[str] | None = None,
 ) -> int:
     today = date.today()
     span = DayRange(
@@ -200,15 +218,25 @@ def schedule(
     )
     if not span:
         raise ValueError(f"start {span.start} is after end {span.end}")
+    for kind in kinds or ():
+        get(kind)
 
     total = 0
     for kind, spec in TASKS.items():
-        added = enqueue(session, kind, spec.buckets(today, span))
-        reopened = (
-            reopen(session, kind, today - timedelta(days=spec.volatile))
-            if spec.volatile
-            else 0
-        )
+        if kinds and kind not in kinds:
+            continue
+        buckets = spec.buckets(today, span)
+        added = enqueue(session, kind, buckets)
+        if redo:
+            # Exactly the buckets this span covers, whatever state they are in.
+            # A chunked kind stores the bucket start, which can precede span.start.
+            reopened = (
+                reopen(session, kind, min(buckets), max(buckets)) if buckets else 0
+            )
+        elif spec.volatile:
+            reopened = reopen(session, kind, today - timedelta(days=spec.volatile))
+        else:
+            reopened = 0
         total += added + reopened
         if added or reopened:
             logger.info("%s: %d new, %d re-opened", kind, added, reopened)
@@ -225,7 +253,11 @@ def retry(session: Session, kind: str | None = None) -> int:
         "CursorResult[Any]",
         session.execute(
             statement.values(
-                status=JobStatus.PENDING, attempts=0, error=None, not_before=None
+                status=JobStatus.PENDING,
+                attempts=0,
+                deferrals=0,
+                error=None,
+                not_before=None,
             )
         ),
     ).rowcount
@@ -284,9 +316,24 @@ def _finish(
     session.commit()
 
 
-def defer(session: Session, job: Job, reason: str) -> None:
+def defer(
+    session: Session, job: Job, reason: str, until: datetime | None = None
+) -> bool:
+    # A deferral is not an attempt: the job never got to do its work.
     job.attempts = max(0, job.attempts - 1)
-    _finish(session, job, JobStatus.PENDING, reason, utc_now() + NOT_READY_DELAY)
+    job.deferrals += 1
+    if job.deferrals >= MAX_DEFERRALS:
+        _finish(
+            session,
+            job,
+            JobStatus.FAILED,
+            f"still not ready after {job.deferrals} deferral(s): {reason}",
+        )
+        return False
+    _finish(
+        session, job, JobStatus.PENDING, reason, until or utc_now() + NOT_READY_DELAY
+    )
+    return True
 
 
 def retry_or_fail(session: Session, job: Job, error: str) -> bool:
@@ -325,8 +372,33 @@ def run_pending(session: Session) -> int:
                 rows = run_job(session, job)
             except NotReady as exc:
                 session.rollback()
-                defer(session, job, str(exc))
-                logger.info("%s %s deferred: %s", job.kind, job.day, exc)
+                if defer(session, job, str(exc)):
+                    logger.info(
+                        "%s %s deferred (%d/%d): %s",
+                        job.kind,
+                        job.day,
+                        job.deferrals,
+                        MAX_DEFERRALS,
+                        exc,
+                    )
+                else:
+                    logger.error(
+                        "%s %s never became ready after %d deferral(s), giving up: %s",
+                        job.kind,
+                        job.day,
+                        job.deferrals,
+                        exc,
+                    )
+            except QuotaExhausted as exc:
+                session.rollback()
+                defer(session, job, str(exc), exc.retry_at)
+                logger.warning(
+                    "%s %s hit an API quota (%s), deferred until %s",
+                    job.kind,
+                    job.day,
+                    exc,
+                    exc.retry_at.isoformat(timespec="seconds"),
+                )
             except Exception as exc:
                 session.rollback()
                 again = retry_or_fail(session, job, str(exc))

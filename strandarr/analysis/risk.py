@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from strandarr.analysis import Float
 from strandarr.analysis.drift import MAX_DRIFT_DAYS
 from strandarr.analysis.geo import SegmentIndex, coast, load_segments
+from strandarr.config import settings
 from strandarr.db import replace
 from strandarr.errors import NotReady
 from strandarr.models import Condition, DriftDaily, SegmentRisk, Stranding
@@ -41,7 +42,12 @@ SLOTS = 366
 _SLOT_YEAR = 2000
 PRIOR_EVENTS = 0.5
 
-COEFFICIENTS_PATH = Path(__file__).resolve().parent.parent / "coefficients.json"
+PACKAGED_COEFFICIENTS = Path(__file__).resolve().parent.parent / "coefficients.json"
+COEFFICIENTS_PATH = (
+    Path(settings.coefficients_path)
+    if settings.coefficients_path
+    else PACKAGED_COEFFICIENTS
+)
 
 
 @dataclass(frozen=True)
@@ -52,10 +58,16 @@ class Model:
     seasonal_weight: float
     seasonal_baseline: float
     fitted: bool
+    index_breaks: list[float]
+    index_levels: list[float]
 
     @classmethod
     def load(cls) -> "Model":
-        raw = json.loads(COEFFICIENTS_PATH.read_text())
+        # A fit written to a volume wins; the packaged file is the starting point.
+        path = (
+            COEFFICIENTS_PATH if COEFFICIENTS_PATH.exists() else PACKAGED_COEFFICIENTS
+        )
+        raw = json.loads(path.read_text())
         return cls(
             intercept=float(raw["intercept"]),
             weights={name: float(raw["weights"][name]) for name in SIGNALS},
@@ -63,6 +75,8 @@ class Model:
             seasonal_weight=float(raw["seasonal_weight"]),
             seasonal_baseline=float(raw["seasonal_baseline"]),
             fitted=bool(raw.get("fitted", False)),
+            index_breaks=[float(value) for value in raw.get("index_breaks", ())],
+            index_levels=[float(value) for value in raw.get("index_levels", ())],
         )
 
     def dump(self) -> dict[str, Any]:
@@ -73,9 +87,12 @@ class Model:
             "seasonal_weight": self.seasonal_weight,
             "seasonal_baseline": self.seasonal_baseline,
             "fitted": self.fitted,
+            "index_breaks": self.index_breaks,
+            "index_levels": self.index_levels,
         }
 
     def save(self) -> None:
+        COEFFICIENTS_PATH.parent.mkdir(parents=True, exist_ok=True)
         COEFFICIENTS_PATH.write_text(json.dumps(self.dump(), indent=2) + "\n")
 
 
@@ -97,6 +114,46 @@ def predict(matrix: Float, model: Model) -> Float:
 def logit(chance: Float) -> Float:
     safe = np.clip(chance, 1e-9, 1.0 - 1e-9)
     return np.asarray(np.log(safe / (1.0 - safe)))
+
+
+INDEX_QUANTILES = 101
+INDEX_FALLBACK_LOW = 1e-4
+INDEX_FALLBACK_HIGH = 0.08
+
+
+def index_of(probability: Float, model: Model) -> Float:
+    """Rescale the probability to 0-100 for the map.
+
+    A monotone rescale, so the index can never disagree with the model, and a
+    fixed one, so the same colour means the same absolute chance on every day --
+    unlike a per-day share of the peak, which makes a flat-calm day and a storm
+    day look identical. The breakpoints are the probability quantiles frozen by
+    `strandarr fit`; before the first fit a log scale stands in, because the
+    probabilities are skewed enough that a linear one renders everything at zero.
+    """
+    values = np.asarray(probability, dtype=np.float64)
+    if len(model.index_breaks) >= 2:
+        return np.asarray(np.interp(values, model.index_breaks, model.index_levels))
+    low, high = np.log10(INDEX_FALLBACK_LOW), np.log10(INDEX_FALLBACK_HIGH)
+    scaled = (np.log10(np.clip(values, INDEX_FALLBACK_LOW, None)) - low) / (high - low)
+    return np.asarray(100.0 * np.clip(scaled, 0.0, 1.0))
+
+
+def index_scale(probability: Float) -> tuple[list[float], list[float]]:
+    """Quantile breakpoints mapping the probability distribution onto 0-100.
+
+    Flat stretches of the distribution would repeat a breakpoint, which makes
+    np.interp pick arbitrarily between the levels there, so duplicates are dropped
+    rather than nudged apart -- most of the mass sits at the low end and nudging
+    would distort exactly where it matters.
+    """
+    shares = np.linspace(0.0, 1.0, INDEX_QUANTILES)
+    breaks = np.quantile(np.asarray(probability, dtype=np.float64), shares)
+    keep = np.concatenate([np.diff(breaks) > 0.0, [True]])
+    return (
+        [float(value) for value in breaks[keep]],
+        [float(value) for value in (100.0 * shares)[keep]],
+    )
 
 
 @dataclass(frozen=True)
@@ -440,7 +497,22 @@ def fit(session: Session, seed: int = 0) -> Model:
         seasonal_weight=float(beta[-1]),
         seasonal_baseline=past.baseline,
         fitted=True,
+        index_breaks=[],
+        index_levels=[],
     )
+
+    # The map scale has to come from what this model predicts, not from the
+    # probabilities on record, which the previous coefficients produced.
+    everywhere = predict(
+        design(
+            {name: values[:, position] for position, name in enumerate(SIGNALS)},
+            seasonal,
+            model,
+        ),
+        model,
+    )
+    breaks, levels = index_scale(everywhere)
+    model = Model(**{**model.dump(), "index_breaks": breaks, "index_levels": levels})
     model.save()
     logger.info(
         "fit: %d positive(s) and %d sampled negative(s) of %d segment-day(s)",
@@ -454,6 +526,27 @@ def fit(session: Session, seed: int = 0) -> Model:
         )
     logger.info("  %-14s weight %+.4f", "seasonal", model.seasonal_weight)
     logger.info("  %-14s %+.4f", "intercept", model.intercept)
+    logger.info(
+        "  index scale: %d breakpoint(s), probability %.3g at 0 to %.3g at 100",
+        len(breaks),
+        breaks[0] if breaks else 0.0,
+        breaks[-1] if breaks else 0.0,
+    )
+
+    # Between-day spread is what makes a calm day look different from a storm.
+    # If the model's variation is mostly spatial, no colour scale can create it.
+    by_day: dict[date, list[float]] = {}
+    for row, chance in zip(stored, everywhere, strict=True):
+        by_day.setdefault(row[0], []).append(float(chance))
+    means = np.array([np.mean(values) for values in by_day.values()])
+    spreads = np.array([np.std(values) for values in by_day.values()])
+    logger.info(
+        "  spread: between-day %.4g, within-day %.4g (ratio %.2f) -- "
+        "a low ratio means the map will look much the same every day",
+        float(np.std(means)),
+        float(np.mean(spreads)),
+        float(np.std(means) / np.mean(spreads)) if np.mean(spreads) > 0 else 0.0,
+    )
     return model
 
 

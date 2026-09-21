@@ -1,5 +1,7 @@
+import json
 import logging
 import math
+import pathlib
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import pairwise
@@ -180,15 +182,43 @@ def grid_points(segments: "SegmentIndex") -> list[Point]:
     return cached
 
 
+GRID_POINTS_PATH = pathlib.Path(__file__).resolve().parent.parent / "grid_points.json"
+
+
+def stored_points() -> list[Point] | None:
+    """The cells actually worth requesting, decided once and shipped.
+
+    Which cells are sea is a bathymetry question, and answering it needs an
+    elevation source we do not want to depend on at run time. `scripts/build-grid.py`
+    answers it once and writes the list here. Without the file every cell within
+    reach of the shore is sampled, inland ones included -- correct, but it roughly
+    doubles the requests and stores rows the marine model cannot fill.
+    """
+    if not GRID_POINTS_PATH.exists():
+        return None
+    raw = json.loads(GRID_POINTS_PATH.read_text())
+    return [GRID.cell(float(lat), float(lon)) for lat, lon in raw["points"]]
+
+
 def sampled_points(index: NearestIndex) -> list[Point]:
+    total = len(GRID.points())
+    stored = stored_points()
+    if stored is not None:
+        logger.info(
+            "grid: %d of %d cells, from %s", len(stored), total, GRID_POINTS_PATH.name
+        )
+        return stored
+
     limit = settings.max_distance_to_coast_km
     points = [
         point for point in GRID.points() if index.distance_km(point, limit) is not None
     ]
-    logger.info(
-        "grid: %d of %d cells within %.0f km of shore",
+    logger.warning(
+        "grid: %s is missing, falling back to every one of the %d of %d cells "
+        "within %.0f km of shore, inland cells included",
+        GRID_POINTS_PATH.name,
         len(points),
-        len(GRID.points()),
+        total,
         limit,
     )
     return points

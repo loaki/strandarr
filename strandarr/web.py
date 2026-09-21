@@ -3,11 +3,13 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any
 
+import numpy as np
 from fastapi import Depends, FastAPI, Query
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session as OrmSession
 
+from strandarr.analysis import risk
 from strandarr.analysis.risk import SIGNALS
 from strandarr.db import Session
 from strandarr.models import (
@@ -63,13 +65,22 @@ SEA_STATE_FIELDS = (
     "wave_direction_deg",
     "wave_period_s",
     "swell_height_m",
+    "swell_direction_deg",
+    "swell_period_s",
     "wind_speed_kmh",
     "wind_direction_deg",
     "current_speed_kmh",
     "current_direction_deg",
+    "sea_surface_temperature_c",
+    "sea_level_m",
 )
 
 app = FastAPI(title="strandarr")
+
+# The index is a fixed rescale of the stored probability, so it lives with the
+# coefficients rather than in a column. Refitting changes it for every day at
+# once, which is why `strandarr fit` tells you to re-run the risk jobs.
+RISK_MODEL = risk.Model.load()
 
 
 def _hour(at: datetime) -> datetime:
@@ -117,7 +128,9 @@ def get_risk(day: Day, db: Db) -> dict[str, Any]:
         .order_by(SegmentRisk.probability.desc())
     ).all()
 
-    peak = max((float(row[5]) for row in rows), default=0.0)
+    index = risk.index_of(
+        np.array([float(row[5]) for row in rows], dtype=np.float64), RISK_MODEL
+    )
     features = [
         {
             "type": "Feature",
@@ -130,19 +143,23 @@ def get_risk(day: Day, db: Db) -> dict[str, Any]:
                 "lat": row[1],
                 "lon": row[2],
                 "length_km": row[3],
+                "index": float(index[position]),
                 "probability": float(row[5]),
                 "seasonal": float(row[6]),
                 "source": row[7],
-                "relative_index": 100.0 * float(row[5]) / peak if peak else 0.0,
                 **{
                     name: float(value)
                     for name, value in zip(SIGNALS, row[8:], strict=True)
                 },
             },
         }
-        for row in rows
+        for position, row in enumerate(rows)
     ]
-    return {"type": "FeatureCollection", "features": features, "peak": peak}
+    return {
+        "type": "FeatureCollection",
+        "features": features,
+        "fitted": RISK_MODEL.fitted,
+    }
 
 
 @app.get("/api/strandings")

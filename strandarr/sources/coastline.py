@@ -4,7 +4,7 @@ from collections.abc import Iterator
 from typing import Any, cast
 
 import httpx
-from sqlalchemy import CursorResult, delete
+from sqlalchemy import CursorResult, delete, func, select
 from sqlalchemy.orm import Session
 
 from strandarr.analysis.geo import (
@@ -30,6 +30,13 @@ TIMEOUT_SECONDS = 120
 SEGMENT_LENGTH_KM = 10.0
 DENSIFY_KM = 2.0
 REGION_MARGIN_DEG = 4.0
+
+# drift_daily and segment_risk cascade from coastal_segment, so a coastline that
+# comes back short would take years of simulation with it. The coastline is a
+# pinned file that should never move; a prune this large means the fetch is wrong,
+# not the coast.
+MAX_PRUNE_SHARE = 0.05
+MIN_PRUNE_SEGMENTS = 5
 
 
 def fetch_lines() -> list[list[Point]]:
@@ -101,15 +108,40 @@ def _segment(points: list[Point], length_km: float) -> CoastalSegment:
 
 def build(session: Session) -> int:
     built = segments(fetch_lines())
+    if not built:
+        raise RuntimeError(
+            "coastline: the source yielded no segments, refusing to store"
+        )
+
+    stored = session.execute(
+        select(func.count()).select_from(CoastalSegment)
+    ).scalar_one()
+    keep = {segment.external_id for segment in built}
+    stale = session.execute(
+        select(func.count())
+        .select_from(CoastalSegment)
+        .where(CoastalSegment.external_id.notin_(keep))
+    ).scalar_one()
+    _guard_prune(stored, stale)
+
     written = upsert(session, CoastalSegment, built, overwrite=True)
     removed = cast(
         "CursorResult[Any]",
         session.execute(
-            delete(CoastalSegment).where(
-                CoastalSegment.external_id.notin_({s.external_id for s in built})
-            )
+            delete(CoastalSegment).where(CoastalSegment.external_id.notin_(keep))
         ),
     ).rowcount
     session.commit()
     logger.info("coastline: %d segment(s) stored, %d stale removed", written, removed)
     return written
+
+
+def _guard_prune(stored: int, stale: int) -> None:
+    allowed = max(MIN_PRUNE_SEGMENTS, int(MAX_PRUNE_SHARE * stored))
+    if stale > allowed:
+        raise RuntimeError(
+            f"coastline: would remove {stale} of {stored} stored segment(s), "
+            f"more than the {allowed} allowed. Deleting a segment cascades to its "
+            f"drift and risk history, so this is refused. Check the coastline "
+            f"source, or clear the table deliberately if the change is intended"
+        )

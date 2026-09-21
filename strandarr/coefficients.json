@@ -18,5 +18,7 @@
   },
   "seasonal_weight": 0.5,
   "seasonal_baseline": 0.0,
-  "fitted": false
+  "fitted": false,
+  "index_breaks": [],
+  "index_levels": []
 }

@@ -1,4 +1,4 @@
-SRCS := strandarr
+SRCS := strandarr alembic scripts
 MYPY_SRCS := strandarr
 
 # `make db-revision m='...'` is accepted as a shorthand for MSG=
@@ -42,8 +42,13 @@ typing: ## check typing using mypy
 	@uv run mypy $(MYPY_SRCS)
 mypy: typing
 
+.PHONY: check-schedule
+check-schedule: ## prove every job kind eventually covers every day it claims
+	@echo >&2 Checking schedule coverage...
+	@uv run python scripts/check-schedule.py
+
 .PHONY: all-checks
-all-checks: lint format-check typing  ## run all checks (lint + format + typing)
+all-checks: lint format-check typing check-schedule  ## run all checks
 
 .PHONY: db-revision
 db-revision: ## autogenerate an alembic migration, usage: make db-revision MSG='describe change'

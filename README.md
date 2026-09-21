@@ -21,6 +21,12 @@ declares a `volatile` window (`strandarr/jobs.py`). Drift re-runs for 20 days
 because that is how long its forcing window takes to be fully archived. It is
 deliberately blunt — it can recompute more than needed, never less.
 
+A chunked kind needs `volatile >= chunk + lag` for a second reason. Its job is
+enqueued as soon as *any* of its days is old enough, and it ingests only the days
+available when it runs, so without re-opening the trailing chunk would stay
+partly ingested for ever while the job reads `done`.
+`make check-schedule` replays the calendar and fails if any kind leaves a gap.
+
 | kind | what it does | window |
 |---|---|---|
 | `gfw` | fishing effort per vessel-hour | from 2012, 4-day lag |
@@ -31,6 +37,10 @@ deliberately blunt — it can recompute more than needed, never less.
 | `strandings_pelagis` | Pelagis histo-carto | from 2023, 30-day chunks |
 | `drift` | particle simulation per release day | from 2022, 4-day lag |
 | `risk` | probability per segment per day | from 2022, forecast days ahead |
+
+`strandarr status` shows what is queued, what failed, and what is waiting on
+inputs. A job whose inputs never arrive is deferred, not retried, and is failed
+after `MAX_DEFERRALS` so it cannot re-queue itself for ever.
 
 ## Setup
 
@@ -63,6 +73,17 @@ strandarr retry --kind gfw               # re-queue failed jobs after fixing a t
 strandarr work                           # consume the queue (the worker service)
 ```
 
+`schedule` skips days already `done`. To compute a day *again* — after a refit,
+or after changing the model — re-open it explicitly:
+
+```bash
+strandarr schedule --start 2022-01-01 --kind risk --redo
+```
+
+Jobs are claimed oldest day first, because drift for a day feeds the risk of the
+days after it. A long backfill therefore runs ahead of the present: queue it in
+stages (a year at a time) and let each drain, or the live map waits behind it.
+
 ## The risk model
 
 Six signals feed a logistic model over a seasonal baseline built from the
@@ -80,6 +101,24 @@ day are meant to score differently, which per-day ranking would erase.
 refitting reads straight from that table and only `probability` has to be
 recomputed afterwards.
 
+### The map index
+
+The map draws one number per segment: a **stranding index**, 0–100. It is a
+fixed monotone rescale of `probability`, so it can never disagree with the model,
+and the scale does not move from day to day — the same colour means the same
+absolute chance whenever you look. That is the point: a share of the day's peak,
+which is what the map used to show, makes a flat-calm day and a storm day look
+identical.
+
+The breakpoints are the probability quantiles frozen by `strandarr fit` and kept
+in `coefficients.json` next to the weights, so the index is computed at request
+time and no column stores it. Before the first fit a fixed log scale stands in,
+and the map says so.
+
+Whether a calm day *looks* calm is a property of the model, not of the scale — a
+monotone rescale cannot create contrast that the probabilities do not have. `fit`
+logs the between-day and within-day spread so you can see which dominates.
+
 ### Fitting
 
 Coefficients live in `strandarr/coefficients.json` and ship **unfitted** — the
@@ -88,10 +127,15 @@ scaled differently. They are a starting point, not a calibration. After the
 first real backfill:
 
 ```bash
-strandarr fit                            # refit from segment_risk + strandings
-strandarr schedule --start 2022-01-01    # recompute probabilities
-strandarr skill                          # AUC of stored predictions
+strandarr fit                                              # refit from segment_risk + strandings
+strandarr schedule --start 2022-01-01 --kind risk --redo   # apply it to stored days
+strandarr skill                                            # AUC of stored predictions
 ```
+
+`fit` writes to `COEFFICIENTS_PATH`, which Compose points at a volume shared by
+the worker and the web service — otherwise a rebuilt image would discard the fit,
+and with it the map's scale. The web service reads the file at start-up, so
+restart it after a refit.
 
 `fit` keeps every segment-day a stranding happened on and samples 20 negatives
 per positive, then corrects the intercept back to the true base rate.
@@ -108,7 +152,54 @@ strandarr/
   analysis/  geo.py drift.py risk.py         the region, the simulation, the model
   sources/   http.py + one file per source   everything that talks to the outside
   static/                                    MapLibre map, no build step
+  coefficients.json                          fitted weights and the index scale
+  grid_points.json                           the cells worth requesting
+scripts/
+  export-grid.sh                             freeze the grid from a live grid_cell
+  build-grid.py                              or rebuild it from coastline + bathymetry
+  rehearse-migration.sh                      run the migration on a copy of production
+  check-schedule.py                          prove the scheduler leaves no gaps
+  backup-db.sh restore-db.sh                 dump and restore
 ```
+
+`grid_points.json` decides which cells are requested: sea cells within
+`MAX_DISTANCE_TO_COAST_KM`, plus land cells within `COASTAL_LAND_MARGIN_KM`.
+Without it every cell within reach of the shore is sampled, inland ones included
+— correct, but roughly twice the requests for rows the marine model cannot fill.
+The worker warns when the file is missing.
+
+## Upgrading a database from before the refactor
+
+The migration chain is two revisions: `0001_baseline` is the old schema squashed,
+and `0002_refactor` folds it onto the current models. A live database is already
+stamped at `0001_baseline`, so only `0002_refactor` runs there; a fresh install
+runs both and lands on exactly the same schema.
+
+`0002_refactor` keeps everything that cost an API call or a simulation. It merges
+`marine_condition`'s four source rows per cell-hour into one `condition` row,
+archived value first and forecast second — the precedence the old read path
+applied on every query. It keeps `drift_daily` (the drift physics did not change),
+`stranding`, `vessel_position` and `coastal_segment` with their ids intact, and it
+seeds the `job` table from `ingest_coverage` so nothing already fetched is fetched
+again. It drops `segment_risk`, because the new model needs two signals the old
+one never stored and filling them with zeros would corrupt `strandarr fit`; those
+rows are recomputed locally.
+
+```bash
+scripts/backup-db.sh                      # this dump is the only way back
+scripts/export-grid.sh                    # BEFORE migrating, while grid_cell exists
+
+# rehearse on a copy, never on the live database
+createdb rehearsal && pg_restore -d rehearsal --no-owner backups/strandarr_<ts>.dump
+POSTGRES_DB=rehearsal POSTGRES_HOST=127.0.0.1 scripts/rehearse-migration.sh
+```
+
+Then rename `MARINE_FORECAST_HOURS` to `FORECAST_HOURS` in `.env` — unknown keys
+are ignored rather than rejected, so a stale name fails silently — and bring the
+stack up. Afterwards, backfill `risk` in stages and refit.
+
+`downgrade()` raises: merging the condition sources cannot be undone from what is
+left. Restore the dump.
 
 ## Development
 

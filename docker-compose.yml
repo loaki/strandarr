@@ -36,6 +36,9 @@ services:
     environment:
       POSTGRES_HOST: db
       POSTGRES_PORT: 5432
+      COEFFICIENTS_PATH: /app/data/coefficients.json
+    volumes:
+      - model_data:/app/data
     command:
       - uvicorn
       - strandarr.web:app
@@ -82,6 +85,9 @@ services:
     environment:
       POSTGRES_HOST: db
       POSTGRES_PORT: 5432
+      COEFFICIENTS_PATH: /app/data/coefficients.json
+    volumes:
+      - model_data:/app/data
     command: [ "strandarr", "work" ]
     depends_on:
       init:
@@ -122,6 +128,9 @@ services:
 volumes:
   db_data:
   pgadmin_data:
+  # `strandarr fit` writes here, so a rebuilt image does not throw the fit away.
+  # The web service reads the same file: the map index is scaled from it.
+  model_data:
 
 networks:
   default: {}
