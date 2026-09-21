@@ -29,7 +29,12 @@ Run scripts/export-grid.sh BEFORE this migration: it copies the grid grid_cell
 describes into strandarr/grid_points.json, which is the only thing in that table
 the new code still needs.
 
-Revision ID: 0002_refactor
+The chain is four revisions, not twenty-two: 0001 squashes everything the
+deployed database already has, 0002 and 0003 are the two it never got to, and
+this one does the refactor. A live database joins the chain wherever it is
+stamped; a fresh install runs all four and lands in the same place.
+
+Revision ID: 0004_refactor
 Revises: 7b4d18e6c052
 """
 
@@ -40,7 +45,7 @@ from sqlalchemy.dialects import postgresql
 
 from alembic import op
 
-revision: str = "0002_refactor"
+revision: str = "0004_refactor"
 down_revision: str | None = "7b4d18e6c052"
 branch_labels: Sequence[str] | None = None
 depends_on: Sequence[str] | None = None

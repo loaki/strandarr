@@ -23,8 +23,15 @@ echo "### before"
 at="$($PY -m alembic current 2>/dev/null | tail -1)"
 echo "    revision: $at"
 case "$at" in
-    7b4d18e6c052*) ;;
-    *) echo "    expected to start at 7b4d18e6c052; refusing" >&2; exit 1 ;;
+    # Any revision the chain still knows how to walk forward from.
+    5f2b94d0e3a8*|6a3c72fb1e94*|7b4d18e6c052*) ;;
+    0004_refactor*) echo "    already migrated; nothing to rehearse" >&2; exit 1 ;;
+    "")             echo "    no alembic_version: this is not a strandarr database" >&2; exit 1 ;;
+    *)
+        echo "    '$at' is not in this chain. The refactor squashed the history into" >&2
+        echo "    four revisions starting at 5f2b94d0e3a8; a database older than that" >&2
+        echo "    has to be brought up to it with the pre-refactor code first." >&2
+        exit 1 ;;
 esac
 
 before_cells="$(psql_at "SELECT count(DISTINCT (valid_at, lat, lon)) FROM marine_condition")"

@@ -170,12 +170,22 @@ The worker warns when the file is missing.
 
 ## Upgrading a database from before the refactor
 
-The migration chain is two revisions: `0001_baseline` is the old schema squashed,
-and `0002_refactor` folds it onto the current models. A live database is already
-stamped at `0001_baseline`, so only `0002_refactor` runs there; a fresh install
-runs both and lands on exactly the same schema.
+The migration chain is four revisions instead of twenty-two:
 
-`0002_refactor` keeps everything that cost an API call or a simulation. It merges
+| revision | |
+|---|---|
+| `5f2b94d0e3a8` | the deployed schema, squashed — never runs on a live database |
+| `6a3c72fb1e94` | carried over unchanged: `ingest_coverage` gains its measurements |
+| `7b4d18e6c052` | carried over unchanged: `segment_forecast` + `segment_climatology` become `segment_risk` |
+| `0004_refactor` | the refactor |
+
+A live database joins wherever it is stamped and walks forward; a fresh install
+runs all four and lands on exactly the same schema. **Check where yours is before
+anything else** — `alembic current` — because the chain starts at `5f2b94d0e3a8`
+and cannot migrate a database older than that. One older would need the
+pre-refactor code to bring it up first.
+
+`0004_refactor` keeps everything that cost an API call or a simulation. It merges
 `marine_condition`'s four source rows per cell-hour into one `condition` row,
 archived value first and forecast second — the precedence the old read path
 applied on every query. It keeps `drift_daily` (the drift physics did not change),
@@ -183,7 +193,9 @@ applied on every query. It keeps `drift_daily` (the drift physics did not change
 seeds the `job` table from `ingest_coverage` so nothing already fetched is fetched
 again. It drops `segment_risk`, because the new model needs two signals the old
 one never stored and filling them with zeros would corrupt `strandarr fit`; those
-rows are recomputed locally.
+rows are recomputed locally, with no API call. If your database predates
+`7b4d18e6c052`, `segment_forecast` and `segment_climatology` go the same way on
+the same reasoning.
 
 ```bash
 scripts/backup-db.sh                      # this dump is the only way back
@@ -200,6 +212,11 @@ stack up. Afterwards, backfill `risk` in stages and refit.
 
 `downgrade()` raises: merging the condition sources cannot be undone from what is
 left. Restore the dump.
+
+If `init` exits with `Can't locate revision identified by '<id>'`, the database is
+stamped at a revision this chain does not contain. Nothing has been changed --
+alembic refuses before it writes anything. Check `alembic current` against the
+table above.
 
 ## Development
 

@@ -1,11 +1,10 @@
-"""The schema as it stood before the refactor.
+"""The schema as the running server has it, squashed into one revision.
 
-This is the 22 revisions that came before, squashed into one. The live database
-is already stamped with this revision, so it never runs there -- it exists so a
-fresh install reaches the same starting point, and so 0002 has one linear parent
-instead of a history nobody reads.
+The deployed database is stamped `5f2b94d0e3a8`, so this never runs there -- it
+exists so a fresh install reaches the same starting point, and so the revisions
+after it have one linear parent instead of twenty files nobody reads.
 
-Revision ID: 7b4d18e6c052
+Revision ID: 5f2b94d0e3a8
 Revises:
 """
 
@@ -16,7 +15,7 @@ from sqlalchemy.dialects import postgresql
 
 from alembic import op
 
-revision: str = "7b4d18e6c052"
+revision: str = "5f2b94d0e3a8"
 down_revision: str | None = None
 branch_labels: Sequence[str] | None = None
 depends_on: Sequence[str] | None = None
@@ -80,9 +79,7 @@ def upgrade() -> None:
         sa.Column("kind", sa.String(length=64), nullable=False),
         sa.Column("day", sa.Date(), nullable=False),
         sa.Column("row_count", sa.Integer(), nullable=False),
-        sa.Column("cell_count", sa.Integer(), nullable=False),
         sa.Column("complete", sa.Boolean(), nullable=False),
-        sa.Column("checked_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("id"),
@@ -228,15 +225,41 @@ def upgrade() -> None:
         unique=True,
     )
     op.create_table(
-        "segment_risk",
+        "segment_climatology",
+        sa.Column("coastal_segment_id", sa.Integer(), nullable=False),
+        sa.Column("day_of_year", sa.Integer(), nullable=False),
+        sa.Column("model_version", sa.String(length=16), nullable=False),
+        sa.Column("observed", sa.Float(), nullable=False),
+        sa.Column("expected_per_day", sa.Float(), nullable=False),
+        sa.Column("probability", sa.Float(), nullable=False),
+        sa.Column("years", sa.Integer(), nullable=False),
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.ForeignKeyConstraint(
+            ["coastal_segment_id"], ["coastal_segment.id"], ondelete="CASCADE"
+        ),
+        sa.PrimaryKeyConstraint("id"),
+    )
+    op.create_index(
+        "ix_segment_climatology_day",
+        "segment_climatology",
+        ["day_of_year"],
+        unique=False,
+    )
+    op.create_index(
+        "ix_segment_climatology_dedup",
+        "segment_climatology",
+        ["coastal_segment_id", "day_of_year", "model_version"],
+        unique=True,
+    )
+    op.create_table(
+        "segment_forecast",
         sa.Column("day", sa.Date(), nullable=False),
         sa.Column("coastal_segment_id", sa.Integer(), nullable=False),
         sa.Column("model_version", sa.String(length=16), nullable=False),
-        sa.Column("source", sa.String(length=16), nullable=False),
         sa.Column("probability", sa.Float(), nullable=False),
-        sa.Column("seasonal", sa.Float(), nullable=False),
-        sa.Column("drift_index", sa.Float(), nullable=False),
         sa.Column("persistence", sa.Float(), nullable=False),
+        sa.Column("drift_index", sa.Float(), nullable=False),
         sa.Column("swell_m", sa.Float(), nullable=False),
         sa.Column("onshore_m", sa.Float(), nullable=False),
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
@@ -246,10 +269,12 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("id"),
     )
-    op.create_index("ix_segment_risk_day", "segment_risk", ["day"], unique=False)
     op.create_index(
-        "ix_segment_risk_dedup",
-        "segment_risk",
+        "ix_segment_forecast_day", "segment_forecast", ["day"], unique=False
+    )
+    op.create_index(
+        "ix_segment_forecast_dedup",
+        "segment_forecast",
         ["day", "coastal_segment_id", "model_version"],
         unique=True,
     )
@@ -257,7 +282,8 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     for table in (
-        "segment_risk",
+        "segment_forecast",
+        "segment_climatology",
         "drift_daily",
         "vessel_position",
         "stranding",
