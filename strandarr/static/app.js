@@ -7,7 +7,7 @@ const RISK = {
   color: "#b91c1c",
   property: "index",
   domain: 100,
-  stops: ["#1e3a8a", "#2563eb", "#22d3ee", "#facc15", "#f97316", "#b91c1c"],
+  stops: ["#f2f3f0", "#fcd9c4", "#f4976c", "#d8482f", "#b91c1c"],
 };
 
 const CONDITIONS = [
@@ -58,8 +58,8 @@ const CONDITIONS = [
 ];
 
 const POINTS = [
-  { id: "vessels", label: "Fishing vessels", color: "#0f766e", radius: 4 },
-  { id: "strandings", label: "Strandings", color: "#7c3aed", radius: 6 },
+  { id: "vessels", label: "Fishing vessels", color: "#001d7e", radius: 4 },
+  { id: "strandings", label: "Strandings", color: "#740000", radius: 6 },
 ];
 
 const LAYERS = [RISK, ...CONDITIONS, ...POINTS];
