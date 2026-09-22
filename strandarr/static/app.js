@@ -58,8 +58,8 @@ const CONDITIONS = [
 ];
 
 const POINTS = [
-  { id: "vessels", label: "Fishing vessels", color: "#001d7e", radius: 4 },
-  { id: "strandings", label: "Strandings", color: "#740000", radius: 6 },
+  { id: "vessels", label: "Fishing vessels", color: "#0058aa", radius: 4 },
+  { id: "strandings", label: "Strandings", color: "#bd0000", radius: 6 },
 ];
 
 const LAYERS = [RISK, ...CONDITIONS, ...POINTS];
