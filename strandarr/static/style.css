@@ -70,6 +70,246 @@ html, body {
   font-variant-numeric: tabular-nums;
 }
 
+#about-toggle {
+  display: block;
+  width: 100%;
+  margin-top: 8px;
+  background: #222;
+  color: #ccc;
+  border: 1px solid #444;
+  border-radius: 4px;
+  padding: 5px 8px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  text-align: center;
+}
+
+#about-toggle:hover {
+  background: #2a2a2a;
+  color: #fff;
+}
+
+#about-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  box-sizing: border-box;
+}
+
+#about-backdrop.hidden {
+  display: none;
+}
+
+#about {
+  position: relative;
+  background: #181818;
+  color: #eee;
+  border-radius: 8px;
+  padding: 20px 24px;
+  max-width: 460px;
+  width: 100%;
+  max-height: 100%;
+  overflow-y: auto;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  font-size: 13px;
+}
+
+#about h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+#about h3 {
+  margin: 16px 0 6px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #999;
+}
+
+#about section:first-of-type h3 {
+  margin-top: 4px;
+}
+
+#about ul {
+  margin: 0;
+  padding-left: 18px;
+  line-height: 1.5;
+  color: #ccc;
+}
+
+#about li {
+  margin-bottom: 6px;
+}
+
+#about a {
+  color: #6ea8ff;
+  text-decoration: none;
+}
+
+#about a:hover {
+  color: #96c2ff;
+  text-decoration: underline;
+}
+
+#about-facts {
+  list-style: none;
+  padding-left: 0;
+}
+
+#about-facts .fact {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 4px 0;
+  margin-bottom: 4px;
+}
+
+.fact-value {
+  flex: 0 0 auto;
+  font-size: 17px;
+  font-weight: 600;
+  color: #e0413f;
+  font-variant-numeric: normal;
+}
+
+.fact-label {
+  color: #ccc;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.fact-label a {
+  margin-left: 2px;
+}
+
+#about-close {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  background: none;
+  border: none;
+  color: #999;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 4px 8px;
+}
+
+#about-close:hover {
+  color: #fff;
+}
+
+#about-chart svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.about-chart-empty {
+  color: #999;
+  font-size: 12px;
+  margin: 8px 0;
+}
+
+.about-line {
+  stroke-width: 1.75;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  opacity: 0.9;
+  transition: opacity 0.1s, stroke-width 0.1s;
+}
+
+.about-line-earlier {
+  stroke-width: 1.25;
+  opacity: 0.35;
+}
+
+.about-line.is-active {
+  stroke-width: 3;
+  opacity: 1;
+}
+
+.about-line.is-dimmed {
+  opacity: 0.12;
+}
+
+.about-baseline {
+  stroke: #333;
+  stroke-width: 1;
+}
+
+#about-crosshair {
+  stroke: #444;
+  stroke-width: 1;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.about-axis-label {
+  fill: #777;
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  font-family: system-ui, sans-serif;
+}
+
+#about-chart {
+  position: relative;
+}
+
+.about-tooltip {
+  position: absolute;
+  pointer-events: none;
+  background: #0d0d0d;
+  color: #eee;
+  border: 1px solid #333;
+  border-radius: 4px;
+  padding: 3px 7px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity 0.1s;
+  z-index: 1;
+}
+
+.about-chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-top: 6px;
+  font-size: 11px;
+  color: #999;
+}
+
+.about-chart-legend [data-group] {
+  cursor: default;
+  transition: opacity 0.1s, color 0.1s;
+}
+
+.about-chart-legend [data-group].is-active {
+  color: #fff;
+  font-weight: 600;
+}
+
+.about-chart-legend [data-group].is-dimmed {
+  opacity: 0.4;
+}
+
+.about-line-swatch {
+  display: inline-block;
+  width: 14px;
+  height: 3px;
+  margin-right: 4px;
+  vertical-align: middle;
+  border-radius: 1px;
+}
 
 #timeline {
   position: fixed;

@@ -293,6 +293,306 @@ const legend = document.getElementById("legend");
 const track = document.getElementById("track");
 const jump = document.getElementById("jump");
 
+const DATA_SOURCES = [
+  {
+    text: "Strandings - Observatoire Pelagis (CNRS / La Rochelle Université), " +
+      "national stranding network.",
+    href: "https://www.observatoire-pelagis.cnrs.fr/",
+  },
+  {
+    text: "Fishing vessels - Global Fishing Watch (historical) and live AIS via " +
+      "aisstream.io.",
+    href: "https://globalfishingwatch.org/",
+  },
+  {
+    text: "Sea and weather conditions - Open-Meteo (ERA5 reanalysis and marine " +
+      "forecast).",
+    href: "https://open-meteo.com/",
+  },
+  {
+    text: "Stranding index - drift simulation, fitted against observed " +
+      "strandings.",
+  },
+];
+
+const FACTS = [
+  {
+    value: "1,000+",
+    label: "strandings recorded each year in France",
+    href: "https://www.observatoire-pelagis.cnrs.fr/echouages/reseau-national-echouage/",
+  },
+  {
+    value: "3,005",
+    label: "marine mammals stranded in mainland France, 2023",
+    href: "https://www.observatoire-pelagis.cnrs.fr/wp-content/uploads/2024/12/rapport_echouage_2023.pdf",
+  },
+  {
+    value: "86%",
+    label: "of examined stranded cetaceans showed signs of bycatch",
+    href: "https://www.observatoire-pelagis.cnrs.fr/wp-content/uploads/2022/11/Rapport_CAPECET_DEB_2021.pdf",
+  },
+  {
+    value: "82%",
+    label: "of dead dolphins sink before ever reaching shore",
+    href: "https://www.observatoire-pelagis.cnrs.fr/situation-preoccupante-pour-les-dauphins-communs-du-golfe-de-gascogne/",
+  },
+];
+
+const MONTH_LABELS = [
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+// Fixed-order categorical palette (dark-surface steps), one hue per year.
+const YEAR_COLORS = [
+  "#3987e5", "#d95926", "#199e70", "#c98500",
+  "#d55181", "#008300", "#9085e9", "#e66767",
+];
+const EARLIER_COLOR = "#8a8a8a";
+const MAX_YEAR_SERIES = 8;
+
+function buildChartLayout(byYear) {
+  const width = 400;
+  const height = 190;
+  const topPad = 16;
+  const bottomPad = 34;
+  const padX = 8;
+  const plotHeight = height - topPad - bottomPad;
+  const innerWidth = width - 2 * padX;
+  const step = innerWidth / (MONTH_LABELS.length - 1);
+  const baseline = topPad + plotHeight;
+  const xAt = (i) => padX + i * step;
+  const max = Math.max(
+    1,
+    ...byYear.flatMap((row) => row.months.filter((value) => value !== null))
+  );
+  const yAt = (value) => baseline - (value / max) * plotHeight;
+
+  // Beyond MAX_YEAR_SERIES individually colored lines, the oldest years fold
+  // into one muted "earlier years" bucket so the chart doesn't turn into an
+  // unreadable rainbow as history grows. The bucket itself counts as one of
+  // the MAX_YEAR_SERIES groups, so at most (MAX_YEAR_SERIES - 1) years get
+  // their own hue once bucketing kicks in.
+  const recentCount =
+    byYear.length > MAX_YEAR_SERIES ? MAX_YEAR_SERIES - 1 : byYear.length;
+  const cutoffIndex = byYear.length - recentCount;
+  const series = byYear.map((row, i) =>
+    i < cutoffIndex
+      ? { ...row, color: EARLIER_COLOR, group: "earlier", earlier: true }
+      : { ...row, color: YEAR_COLORS[i - cutoffIndex], group: String(row.year), earlier: false }
+  );
+
+  const pointsByMonth = Array.from({ length: 12 }, () => []);
+  for (const row of series) {
+    row.months.forEach((value, m) => {
+      if (value === null) return;
+      pointsByMonth[m].push({
+        year: row.year,
+        value,
+        y: yAt(value),
+        group: row.group,
+      });
+    });
+  }
+
+  return { width, height, topPad, bottomPad, padX, plotHeight, step, baseline, xAt, yAt, max, series, pointsByMonth };
+}
+
+function chartMarkup(layout) {
+  const { width, height, topPad, padX, baseline, xAt, max, series } = layout;
+
+  const lines = series
+    .map((row) => {
+      const segments = [];
+      let segment = [];
+      row.months.forEach((value, i) => {
+        if (value === null) {
+          if (segment.length) segments.push(segment);
+          segment = [];
+          return;
+        }
+        segment.push(`${segment.length === 0 ? "M" : "L"}${xAt(i)},${layout.yAt(value)}`);
+      });
+      if (segment.length) segments.push(segment);
+      if (!segments.length) return "";
+      return (
+        `<path class="about-line${row.earlier ? " about-line-earlier" : ""}" ` +
+        `data-group="${escapeHtml(row.group)}" stroke="${row.color}" ` +
+        `d="${segments.map((s) => s.join(" ")).join(" ")}" fill="none"></path>`
+      );
+    })
+    .join("");
+
+  const ticks = MONTH_LABELS.map(
+    (name, i) =>
+      `<text class="about-axis-label" x="${xAt(i)}" y="${height - 18}" text-anchor="middle">${name}</text>`
+  ).join("");
+
+  const legendGroups = [];
+  const seenGroups = new Set();
+  for (const row of series) {
+    if (seenGroups.has(row.group)) continue;
+    seenGroups.add(row.group);
+    legendGroups.push(row);
+  }
+  const earlierRow = legendGroups.find((row) => row.earlier);
+  const legend = legendGroups
+    .filter((row) => !row.earlier)
+    .map(
+      (row) =>
+        `<span data-group="${escapeHtml(row.group)}"><i class="about-line-swatch" ` +
+        `style="background:${row.color}"></i>${row.year}</span>`
+    )
+    .join("");
+  const earlierLegend = earlierRow
+    ? `<span data-group="earlier"><i class="about-line-swatch" ` +
+      `style="background:${EARLIER_COLOR}"></i>Before ${series.find((r) => !r.earlier).year}</span>`
+    : "";
+
+  return (
+    `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Strandings per month, one line per year">` +
+    `<line class="about-baseline" x1="${padX}" y1="${baseline}" x2="${width - padX}" y2="${baseline}" />` +
+    `<text class="about-axis-label" x="2" y="${topPad + 3}">${max.toLocaleString()}</text>` +
+    lines +
+    ticks +
+    `<line id="about-crosshair" x1="0" y1="${topPad}" x2="0" y2="${baseline}" />` +
+    `</svg>` +
+    `<div class="about-tooltip"></div>` +
+    `<div class="about-chart-legend">${earlierLegend}${legend}</div>`
+  );
+}
+
+function renderAboutChart(container, byYear) {
+  if (byYear.length === 0) {
+    container.innerHTML = '<p class="about-chart-empty">No stranding history yet.</p>';
+    return;
+  }
+  const layout = buildChartLayout(byYear);
+  container.innerHTML = chartMarkup(layout);
+  wireAboutChartInteractions(container, layout);
+}
+
+function wireAboutChartInteractions(container, layout) {
+  const svg = container.querySelector("svg");
+  const tooltip = container.querySelector(".about-tooltip");
+  const crosshair = container.querySelector("#about-crosshair");
+  const paths = container.querySelectorAll(".about-line");
+  const legendItems = container.querySelectorAll(".about-chart-legend [data-group]");
+  if (!svg) return;
+
+  function clear() {
+    crosshair.style.opacity = "0";
+    tooltip.style.opacity = "0";
+    paths.forEach((path) => path.classList.remove("is-active", "is-dimmed"));
+    legendItems.forEach((item) => item.classList.remove("is-active", "is-dimmed"));
+  }
+
+  svg.addEventListener("mousemove", (event) => {
+    const rect = svg.getBoundingClientRect();
+    if (rect.width === 0) return;
+    const scale = layout.width / rect.width;
+    const mouseX = (event.clientX - rect.left) * scale;
+    const mouseY = (event.clientY - rect.top) * scale;
+    const monthIndex = Math.min(
+      11,
+      Math.max(0, Math.round((mouseX - layout.padX) / layout.step))
+    );
+    const candidates = layout.pointsByMonth[monthIndex];
+    if (!candidates.length) {
+      clear();
+      return;
+    }
+    const nearest = candidates.reduce((best, candidate) =>
+      Math.abs(candidate.y - mouseY) < Math.abs(best.y - mouseY) ? candidate : best
+    );
+
+    crosshair.setAttribute("x1", layout.xAt(monthIndex));
+    crosshair.setAttribute("x2", layout.xAt(monthIndex));
+    crosshair.style.opacity = "1";
+
+    paths.forEach((path) => {
+      const isActive = path.dataset.group === nearest.group;
+      path.classList.toggle("is-active", isActive);
+      path.classList.toggle("is-dimmed", !isActive);
+    });
+    legendItems.forEach((item) => {
+      const isActive = item.dataset.group === nearest.group;
+      item.classList.toggle("is-active", isActive);
+      item.classList.toggle("is-dimmed", !isActive);
+    });
+
+    tooltip.textContent =
+      `${nearest.year} · ${MONTH_LABELS[monthIndex]}: ${nearest.value.toLocaleString()} strandings`;
+    tooltip.style.opacity = "1";
+    const containerRect = container.getBoundingClientRect();
+    const left = Math.min(
+      event.clientX - containerRect.left + 12,
+      containerRect.width - 160
+    );
+    tooltip.style.left = `${Math.max(0, left)}px`;
+    tooltip.style.top = `${Math.max(0, event.clientY - containerRect.top - 30)}px`;
+  });
+
+  svg.addEventListener("mouseleave", clear);
+}
+
+function renderAboutSources() {
+  const list = document.getElementById("about-sources");
+  list.innerHTML = DATA_SOURCES.map(
+    (item) =>
+      `<li>${escapeHtml(item.text)}${
+        item.href
+          ? ` <a href="${escapeHtml(item.href)}" target="_blank" rel="noopener noreferrer">Source</a>`
+          : ""
+      }</li>`
+  ).join("");
+}
+
+function renderAboutFacts() {
+  const list = document.getElementById("about-facts");
+  list.innerHTML = FACTS.map(
+    (fact) =>
+      `<li class="fact">` +
+      `<span class="fact-value">${escapeHtml(fact.value)}</span>` +
+      `<span class="fact-label">${escapeHtml(fact.label)} ` +
+      `<a href="${escapeHtml(fact.href)}" target="_blank" rel="noopener noreferrer">Source</a>` +
+      `</span>` +
+      `</li>`
+  ).join("");
+}
+
+let aboutMonthly = null;
+
+async function openAbout() {
+  aboutBackdrop.classList.remove("hidden");
+  if (aboutMonthly === null) {
+    const chart = document.getElementById("about-chart");
+    chart.textContent = "Loading…";
+    try {
+      aboutMonthly = await fetchJson("/api/strandings/monthly");
+      renderAboutChart(chart, aboutMonthly);
+    } catch {
+      chart.textContent = "Could not load stranding history.";
+    }
+  }
+}
+
+function closeAbout() {
+  aboutBackdrop.classList.add("hidden");
+}
+
+const aboutBackdrop = document.getElementById("about-backdrop");
+renderAboutSources();
+renderAboutFacts();
+document.getElementById("about-toggle").addEventListener("click", openAbout);
+document.getElementById("about-close").addEventListener("click", closeAbout);
+aboutBackdrop.addEventListener("click", (event) => {
+  if (event.target === aboutBackdrop) closeAbout();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !aboutBackdrop.classList.contains("hidden")) closeAbout();
+});
+
 let riskFitted = true;
 let selectedTick = null;
 let hours = [];

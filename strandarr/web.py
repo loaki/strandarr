@@ -161,6 +161,38 @@ def get_strandings(day: Day, db: Db) -> list[dict[str, Any]]:
     return _rows(list(rows), STRANDING_FIELDS)
 
 
+@app.get("/api/strandings/monthly")
+def get_strandings_monthly(db: Db) -> list[dict[str, Any]]:
+    year = func.extract("year", Stranding.recorded_at)
+    month = func.extract("month", Stranding.recorded_at)
+    rows = db.execute(
+        select(year.label("year"), month.label("month"), func.sum(Stranding.individual_count))
+        .group_by(year, month)
+        .order_by(year, month)
+    ).all()
+    by_year: dict[int, dict[int, int]] = {}
+    for year_number, month_number, total in rows:
+        by_year.setdefault(int(year_number), {})[int(month_number)] = int(total)
+    if not by_year:
+        return []
+
+    # The most recent year is still in progress: months after the last one with
+    # any report are "not yet happened", not a genuine drop to zero.
+    latest_year = max(by_year)
+    latest_month = max(by_year[latest_year])
+    return [
+        {
+            "year": year_number,
+            "months": [
+                None if year_number == latest_year and m > latest_month
+                else months.get(m, 0)
+                for m in range(1, 13)
+            ],
+        }
+        for year_number, months in sorted(by_year.items())
+    ]
+
+
 @app.get("/api/vessels")
 def get_vessels(at: Hour, db: Db) -> list[dict[str, Any]]:
     start, end = _window(at)

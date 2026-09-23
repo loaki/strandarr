@@ -13,8 +13,30 @@
   <div id="label"></div>
   <input type="date" id="jump" />
   <div id="legend"></div>
+  <button id="about-toggle" type="button">About this data</button>
 </div>
 <div id="timeline"><div id="track"></div></div>
+<div id="about-backdrop" class="hidden">
+  <div id="about" role="dialog" aria-modal="true" aria-labelledby="about-title">
+    <button id="about-close" type="button" aria-label="Close">&times;</button>
+    <h2 id="about-title">About this data</h2>
+
+    <section>
+      <h3>Data sources</h3>
+      <ul id="about-sources"></ul>
+    </section>
+
+    <section>
+      <h3>Strandings by month, by year</h3>
+      <div id="about-chart"></div>
+    </section>
+
+    <section>
+      <h3>Key figures</h3>
+      <ul id="about-facts"></ul>
+    </section>
+  </div>
+</div>
 <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
 <script src="/app.js"></script>
 </body>
