@@ -5,21 +5,21 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any, cast
 
-from sqlalchemy import CursorResult, case, or_, select, update
+from sqlalchemy import CursorResult, case, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import InterfaceError, OperationalError
 from sqlalchemy.orm import Session
 
 from strandarr import log
 from strandarr.analysis import drift, risk
-from strandarr.analysis.geo import Point, grid_points, load_segments
+from strandarr.analysis.geo import load_cells
 from strandarr.config import settings
 from strandarr.db import unit_of_work
 from strandarr.errors import NotReady
 from strandarr.models import Job, JobStatus, utc_now
-from strandarr.sources import gfw, meteo, strandings
+from strandarr.sources import cmems, gfw, meteo, strandings
 from strandarr.sources.http import QuotaExhausted
-from strandarr.timeframe import DayRange
+from strandarr.timeframe import CHUNK_EPOCH, DayRange
 
 logger = logging.getLogger(__name__)
 
@@ -30,26 +30,18 @@ MAX_DEFERRALS = 168
 RETRY_DELAY = timedelta(minutes=1)
 NOT_READY_DELAY = timedelta(hours=1)
 POLL_SECONDS = 5
+STALE_AFTER = timedelta(hours=2)
 DB_RETRY_SECONDS = 5
 
 DEFAULT_BACKFILL_DAYS = 14
 
-CHUNK_EPOCH = date(2020, 1, 6)
-
-ERA5_FIRST_DAY = date(1940, 1, 1)
-MARINE_FIRST_DAY = date(2022, 1, 1)
+FIRST_DAY = date(2022, 1, 1)
 GBIF_LAST_DAY = date(2022, 12, 31)
 PELAGIS_FIRST_DAY = date(2023, 1, 1)
 GFW_FIRST_DAY = date(2012, 1, 1)
 
 GFW_LAG_DAYS = 4
-ARCHIVE_LAG_DAYS = 5
-
-# A chunked job is enqueued as soon as any of its days is inside the horizon, and
-# it ingests only the days available when it runs. Without re-opening, the trailing
-# chunk would stay partial for ever: re-open it until the whole chunk has aged past
-# the lag.
-ARCHIVE_VOLATILE_DAYS = meteo.DAYS_PER_REQUEST + ARCHIVE_LAG_DAYS
+CMEMS_VOLATILE_DAYS = cmems.DAYS_PER_CHUNK + 2
 
 Handler = Callable[[Session, DayRange], int]
 
@@ -95,16 +87,20 @@ def _per_day(task: Callable[[Session, date], int]) -> Handler:
     return lambda session, days: sum(task(session, day) for day in days)
 
 
-def _points(session: Session) -> list[Point]:
-    return grid_points(load_segments(session))
-
-
-def _archive(product: meteo.Product) -> Handler:
-    return lambda session, days: meteo.archive(session, product, _points(session), days)
-
-
 def _forecast(session: Session, days: DayRange) -> int:
-    return meteo.forecast(session, _points(session))
+    return meteo.forecast(session, load_cells(session))
+
+
+def _drift(session: Session, days: DayRange) -> int:
+    written = sum(drift.run(session, day) for day in days)
+    waiting = session.execute(
+        select(func.min(Job.day)).where(
+            Job.kind == "drift", Job.status != JobStatus.DONE
+        )
+    ).scalar_one_or_none()
+    settled = date.today() - timedelta(days=drift.MAX_DRIFT_DAYS + GFW_LAG_DAYS)
+    cmems.prune(min(waiting or settled, settled))
+    return written
 
 
 TASKS: dict[str, Spec] = {
@@ -113,19 +109,12 @@ TASKS: dict[str, Spec] = {
         first=GFW_FIRST_DAY,
         lag=GFW_LAG_DAYS,
     ),
-    "weather_archive": Spec(
-        run=_archive(meteo.WEATHER_ARCHIVE),
-        first=ERA5_FIRST_DAY,
-        lag=ARCHIVE_LAG_DAYS,
-        chunk=meteo.DAYS_PER_REQUEST,
-        volatile=ARCHIVE_VOLATILE_DAYS,
-    ),
-    "marine_archive": Spec(
-        run=_archive(meteo.MARINE_ARCHIVE),
-        first=MARINE_FIRST_DAY,
-        lag=ARCHIVE_LAG_DAYS,
-        chunk=meteo.DAYS_PER_REQUEST,
-        volatile=ARCHIVE_VOLATILE_DAYS,
+    "cmems": Spec(
+        run=cmems.archive,
+        first=FIRST_DAY,
+        ahead=cmems.FORECAST_DAYS,
+        chunk=cmems.DAYS_PER_CHUNK,
+        volatile=CMEMS_VOLATILE_DAYS,
     ),
     "forecast": Spec(run=_forecast, rolling=True, volatile=1),
     "strandings_gbif": Spec(
@@ -140,14 +129,14 @@ TASKS: dict[str, Spec] = {
         volatile=60,
     ),
     "drift": Spec(
-        run=_per_day(drift.run),
-        first=MARINE_FIRST_DAY,
+        run=_drift,
+        first=FIRST_DAY,
         lag=GFW_LAG_DAYS,
         volatile=drift.MAX_DRIFT_DAYS,
     ),
     "risk": Spec(
         run=_per_day(risk.run),
-        first=MARINE_FIRST_DAY,
+        first=FIRST_DAY,
         ahead=settings.forecast_hours // 24,
         volatile=risk.MAX_LOOKBACK_DAYS,
     ),
@@ -274,7 +263,10 @@ def release_running(session: Session) -> None:
         "CursorResult[Any]",
         session.execute(
             update(Job)
-            .where(Job.status == JobStatus.RUNNING)
+            .where(
+                Job.status == JobStatus.RUNNING,
+                Job.started_at < utc_now() - STALE_AFTER,
+            )
             .values(status=JobStatus.PENDING, started_at=None, not_before=None)
         ),
     ).rowcount

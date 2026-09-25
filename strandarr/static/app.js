@@ -50,8 +50,6 @@ const CONDITIONS = [
       "swell_height_m",
       "swell_direction_deg",
       "swell_period_s",
-      "sea_surface_temperature_c",
-      "sea_level_m",
       "forecast",
     ],
   },
@@ -87,9 +85,6 @@ const FIELD_LABELS = {
   species_scientific: "Species",
   species_common: "Nom commun",
   individual_count: "Individuals",
-  time_uncertainty_hours: "Time uncertainty",
-  coordinate_uncertainty_m: "Position uncertainty",
-  location_precision: "Position from",
   external_id: "Source id",
   wave_height_m: "Wave height",
   wave_direction_deg: "Wave direction",
@@ -101,8 +96,6 @@ const FIELD_LABELS = {
   wind_direction_deg: "Wind direction",
   current_speed_kmh: "Current speed",
   current_direction_deg: "Current direction",
-  sea_surface_temperature_c: "Sea temperature",
-  sea_level_m: "Tide height",
   forecast: "Forecast",
 };
 
@@ -110,11 +103,8 @@ const UNITS = {
   index: "/ 100",
   length_km: "km",
   effort_hours: "h",
-  time_uncertainty_hours: "h",
-  coordinate_uncertainty_m: "m",
   wave_height_m: "m",
   swell_height_m: "m",
-  sea_level_m: "m",
   wave_m: "m",
   swell_m: "m",
   onshore_m: "m",
@@ -123,7 +113,6 @@ const UNITS = {
   swell_period_s: "s",
   wind_speed_kmh: "km/h",
   current_speed_kmh: "km/h",
-  sea_surface_temperature_c: "°C",
 };
 
 const DIRECTION_SENSE = {
@@ -148,7 +137,6 @@ const POPUP_FIELDS = {
   ],
   strandings: [
     "species_common", "species_scientific", "individual_count", "recorded_at",
-    "time_uncertainty_hours", "coordinate_uncertainty_m", "location_precision",
     "source", "external_id",
   ],
 };
@@ -305,13 +293,18 @@ const DATA_SOURCES = [
     href: "https://globalfishingwatch.org/",
   },
   {
-    text: "Sea and weather conditions - Open-Meteo (ERA5 reanalysis and marine " +
-      "forecast).",
+    text: "Currents, waves and wind - Copernicus Marine Service (IBI analysis, " +
+      "forecast and reanalysis; wind L4).",
+    href: "https://marine.copernicus.eu/",
+  },
+  {
+    text: "Wind forecast - Open-Meteo.",
     href: "https://open-meteo.com/",
   },
   {
-    text: "Stranding index - drift simulation, fitted against observed " +
+    text: "Stranding index - OpenDrift simulation, fitted against observed " +
       "strandings.",
+    href: "https://opendrift.github.io/",
   },
 ];
 

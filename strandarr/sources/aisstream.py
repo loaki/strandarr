@@ -9,14 +9,13 @@ from typing import Any
 
 import websockets
 from sqlalchemy import select
-from sqlalchemy.orm import InstrumentedAttribute, Session
 from websockets.asyncio.client import connect
 
 from strandarr.analysis.geo import GRID, BBox
 from strandarr.config import settings
 from strandarr.db import unit_of_work, upsert
-from strandarr.models import VesselPosition
-from strandarr.sources import AIS_LIVE, GFW_FISHING
+from strandarr.models import Vessel, VesselPosition
+from strandarr.sources import AIS_LIVE
 from strandarr.sources.http import backoff
 
 logger = logging.getLogger(__name__)
@@ -34,14 +33,7 @@ FLEET_REFRESH_SECONDS = 1800
 
 Position = dict[str, Any]
 Key = tuple[str, datetime]
-Fleet = dict[str, dict[str, str]]
-
-FLEET_FIELDS: tuple[tuple[str, Any], ...] = (
-    ("flag", VesselPosition.flag),
-    ("gear_type", VesselPosition.gear_type),
-    ("vessel_type", VesselPosition.vessel_type),
-    ("name", VesselPosition.ship_name),
-)
+Fleet = dict[str, int]
 
 
 def subscription(api_key: str, bbox: BBox) -> dict[str, Any]:
@@ -77,7 +69,6 @@ def parse(message: dict[str, Any]) -> dict[str, Any] | None:
         "at": _received_at(meta),
         "lat": float(lat),
         "lon": float(lon),
-        "name": (meta.get("ShipName") or "").strip() or None,
     }
 
 
@@ -123,64 +114,28 @@ async def stream(api_key: str, bbox: BBox) -> AsyncIterator[dict[str, Any]]:
             await asyncio.sleep(delay)
 
 
-def _last_known(
-    session: Session, column: InstrumentedAttribute[str | None]
-) -> dict[str, str]:
-    statement = (
-        select(VesselPosition.mmsi, column)
-        .where(VesselPosition.source == GFW_FISHING, column.isnot(None))
-        .distinct(VesselPosition.mmsi)
-        .order_by(VesselPosition.mmsi, VesselPosition.recorded_at.desc())
-    )
-    return {mmsi: value for mmsi, value in session.execute(statement).all() if value}
-
-
-def fishing_fleet(session: Session) -> Fleet:
-    fleet: Fleet = {
-        mmsi: {}
-        for mmsi in session.execute(
-            select(VesselPosition.mmsi)
-            .where(VesselPosition.source == GFW_FISHING)
-            .distinct()
-        ).scalars()
-    }
-    for field, column in FLEET_FIELDS:
-        for mmsi, value in _last_known(session, column).items():
-            if mmsi in fleet:
-                fleet[mmsi][field] = value
-    return fleet
-
-
 def _hour(at: datetime) -> datetime:
     return at.replace(minute=0, second=0, microsecond=0)
 
 
 def _roster() -> Fleet:
     with unit_of_work() as session:
-        return fishing_fleet(session)
+        return dict(session.execute(select(Vessel.mmsi, Vessel.id)).tuples().all())
 
 
 def _rows(positions: dict[Key, Position], fleet: Fleet) -> list[VesselPosition]:
-    rows = []
-    for (mmsi, hour), position in positions.items():
-        known = fleet.get(mmsi)
-        if known is None:
-            continue
-        rows.append(
-            VesselPosition(
-                mmsi=mmsi,
-                recorded_at=hour,
-                lat=position["lat"],
-                lon=position["lon"],
-                source=AIS_LIVE,
-                ship_name=position.get("name") or known.get("name"),
-                flag=known.get("flag"),
-                gear_type=known.get("gear_type"),
-                vessel_type=known.get("vessel_type"),
-                effort_hours=None,
-            )
+    return [
+        VesselPosition(
+            vessel_id=fleet[mmsi],
+            recorded_at=hour,
+            source=AIS_LIVE,
+            lat=position["lat"],
+            lon=position["lon"],
+            effort_hours=None,
         )
-    return rows
+        for (mmsi, hour), position in positions.items()
+        if mmsi in fleet
+    ]
 
 
 def _write(positions: dict[Key, Position], fleet: Fleet) -> int:

@@ -44,7 +44,7 @@ def _occurrences(params: dict[str, Any]) -> Iterator[dict[str, Any]]:
             offset += PAGE_SIZE
 
 
-def event_window(event_date: str) -> tuple[datetime, float] | None:
+def event_window(event_date: str) -> datetime | None:
     first, _, last = event_date.partition("/")
     try:
         start = _instant(first)
@@ -55,8 +55,7 @@ def event_window(event_date: str) -> tuple[datetime, float] | None:
         return None
     if len(last.strip() or first.strip()) == 10:
         end += timedelta(days=1)
-    half_width = (end - start) / 2
-    return start + half_width, half_width.total_seconds() / 3600
+    return start + (end - start) / 2
 
 
 def _instant(value: str) -> datetime:
@@ -71,15 +70,14 @@ def parse_gbif(occurrence: dict[str, Any]) -> Stranding | None:
     event_date = occurrence.get("eventDate")
     if lat is None or lon is None or not event_date:
         return None
-    window = event_window(event_date)
-    if window is None:
+    recorded_at = event_window(event_date)
+    if recorded_at is None:
         logger.warning(
             "gbif: skipping %s, unusable eventDate %r",
             occurrence.get("key"),
             event_date,
         )
         return None
-    recorded_at, time_uncertainty_hours = window
     scientific, common = species.from_scientific(
         occurrence.get("species") or occurrence.get("scientificName")
     )
@@ -93,9 +91,6 @@ def parse_gbif(occurrence: dict[str, Any]) -> Stranding | None:
         species_scientific=scientific,
         species_common=common,
         individual_count=1 if count is None else int(count),
-        coordinate_uncertainty_m=occurrence.get("coordinateUncertaintyInMeters"),
-        time_uncertainty_hours=time_uncertainty_hours,
-        location_precision="gbif_reported",
     )
 
 
@@ -127,8 +122,7 @@ EVENT_LINE = re.compile(
     r"^\s*(\d{4}-\d{2}-\d{2})\s*/\s*(\d+)\s*/\s*([^/]+?)\s*/\s*(.+?)\s*$"
 )
 
-COMMUNE_UNCERTAINTY_M = 5000.0
-DAY_UNCERTAINTY_HOURS = 12.0
+NOON = timedelta(hours=12)
 
 
 def parse_pelagis(raw: str, bbox: BBox) -> list[Stranding]:
@@ -158,16 +152,12 @@ def parse_pelagis(raw: str, bbox: BBox) -> list[Stranding]:
                 Stranding(
                     external_id=_identity(lat, lon, day, common, commune, index),
                     source=PELAGIS,
-                    recorded_at=datetime.fromisoformat(day).replace(tzinfo=UTC)
-                    + timedelta(hours=DAY_UNCERTAINTY_HOURS),
+                    recorded_at=datetime.fromisoformat(day).replace(tzinfo=UTC) + NOON,
                     lat=lat,
                     lon=lon,
                     species_scientific=scientific,
                     species_common=common,
                     individual_count=int(count),
-                    coordinate_uncertainty_m=COMMUNE_UNCERTAINTY_M,
-                    time_uncertainty_hours=DAY_UNCERTAINTY_HOURS,
-                    location_precision="commune_centroid",
                 )
             )
     return strandings

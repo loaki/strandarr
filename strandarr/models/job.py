@@ -24,6 +24,7 @@ class Job(Base):
     )
     __conflict__: ClassVar[tuple[str, ...]] = ("kind", "day")
 
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     kind: Mapped[str] = mapped_column(String(32), nullable=False)
     day: Mapped[date] = mapped_column(Date, nullable=False)
     status: Mapped[JobStatus] = mapped_column(

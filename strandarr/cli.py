@@ -7,7 +7,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from strandarr import jobs, log
-from strandarr.analysis import risk
+from strandarr.analysis import geo, risk
 from strandarr.db import unit_of_work
 from strandarr.models import Job, JobStatus, utc_now
 from strandarr.sources import aisstream, coastline
@@ -120,6 +120,7 @@ def _status(session: Session, args: argparse.Namespace) -> None:
 
 def _reference(session: Session, args: argparse.Namespace) -> None:
     coastline.build(session)
+    geo.build_cells(session)
 
 
 def _fit(session: Session, args: argparse.Namespace) -> None:
@@ -161,7 +162,7 @@ COMMANDS: tuple[Command, ...] = (
     Command("retry", "re-queue failed jobs", _scoped(_retry), _retry_args),
     Command(
         "reference",
-        "rebuild the coastal segments. Run once before the first schedule",
+        "rebuild the coastal segments and grid cells. Run once before the first schedule",
         _scoped(_reference),
     ),
     Command(

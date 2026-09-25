@@ -12,6 +12,10 @@ class Settings(BaseSettings):
 
     gfw_api_token: str = ""
     aisstream_api_key: str = ""
+    cmems_username: str = ""
+    cmems_password: str = ""
+
+    forcing_dir: str = "forcing"
 
     forecast_hours: int = 72
 
@@ -21,8 +25,6 @@ class Settings(BaseSettings):
 
     coastal_land_margin_km: float = 30.0
 
-    # Where `strandarr fit` writes. Left empty it writes inside the package,
-    # which a rebuilt image throws away -- point it at a volume to keep a fit.
     coefficients_path: str = ""
 
     @property

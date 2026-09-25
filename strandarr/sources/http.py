@@ -23,8 +23,6 @@ HOUR = 3600.0
 OPEN_METEO_BUDGETS = ((MINUTE, 600), (HOUR, 5000))
 
 BUDGETS: dict[str, tuple[tuple[float, int], ...]] = {
-    "archive-api.open-meteo.com": OPEN_METEO_BUDGETS,
-    "marine-api.open-meteo.com": OPEN_METEO_BUDGETS,
     "api.open-meteo.com": OPEN_METEO_BUDGETS,
     "gateway.api.globalfishingwatch.org": ((MINUTE, 30),),
 }

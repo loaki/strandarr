@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 
 DAY = timedelta(days=1)
+CHUNK_EPOCH = date(2020, 1, 6)
 
 
 def midnight(day: date) -> datetime:

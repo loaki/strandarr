@@ -16,7 +16,7 @@ Session = sessionmaker(bind=engine)
 
 MAX_QUERY_PARAMS = 60000
 
-SKIP_COLUMNS = frozenset({"id", "created_at"})
+SKIP_COLUMNS = frozenset({"id"})
 
 
 @contextmanager
@@ -30,7 +30,6 @@ def upsert(
     model: type[Base],
     rows: Sequence[Base],
     overwrite: bool = False,
-    only: Sequence[str] | None = None,
     where: ColumnExpressionArgument[bool] | None = None,
 ) -> int:
     if not rows:
@@ -48,9 +47,7 @@ def upsert(
         for row in rows
     }
     values = list(deduped.values())
-    updatable = [
-        name for name in (only or columns) if name not in conflict and name in columns
-    ]
+    updatable = [name for name in columns if name not in conflict]
 
     batch_size = max(1, MAX_QUERY_PARAMS // len(table.columns))
     for start in range(0, len(values), batch_size):

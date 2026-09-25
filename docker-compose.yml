@@ -86,8 +86,10 @@ services:
       POSTGRES_HOST: db
       POSTGRES_PORT: 5432
       COEFFICIENTS_PATH: /app/data/coefficients.json
+      FORCING_DIR: /app/forcing
     volumes:
       - model_data:/app/data
+      - forcing_data:/app/forcing
     command: [ "strandarr", "work" ]
     depends_on:
       init:
@@ -131,6 +133,7 @@ volumes:
   # `strandarr fit` writes here, so a rebuilt image does not throw the fit away.
   # The web service reads the same file: the map index is scaled from it.
   model_data:
+  forcing_data:
 
 networks:
   default: {}

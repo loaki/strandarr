@@ -3,8 +3,8 @@
 
 A chunked job is enqueued as soon as any of its days is inside the horizon, and
 it ingests only the days available when it runs. If it is never re-opened, the
-trailing chunk stays partial for ever -- this once left the two archive kinds at
-15% coverage, which is invisible from the job table because the job says `done`.
+trailing chunk stays partial for ever -- the job says `done` while the
+data is not there, which is invisible from the job table.
 
 Run it from `make all-checks`. It needs no database.
 """

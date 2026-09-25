@@ -1,8 +1,7 @@
 from datetime import UTC, datetime
 from typing import ClassVar
 
-from sqlalchemy import DateTime
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.schema import MetaData
 
 
@@ -14,11 +13,6 @@ class Base(DeclarativeBase):
     metadata = MetaData()
 
     __conflict__: ClassVar[tuple[str, ...]] = ()
-
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=utc_now
-    )
 
     def __repr__(self) -> str:
         loaded = sorted(

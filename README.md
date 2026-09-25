@@ -1,7 +1,7 @@
 # strandarr
 
-Cetacean stranding risk along the French coast, from fishing effort, sea state
-and the stranding record itself.
+Cetacean stranding risk along the French Atlantic and Channel coast, from
+fishing effort, ocean drift and the stranding record itself.
 
 A cron enqueues work, a worker consumes it, a map shows the result.
 
@@ -18,7 +18,7 @@ day is done; nothing counts rows to work that out.
 
 Days whose inputs are still settling are re-opened by the scheduler: each kind
 declares a `volatile` window (`strandarr/jobs.py`). Drift re-runs for 20 days
-because that is how long its forcing window takes to be fully archived. It is
+because that is how long its forcing window reaches into the forecast. It is
 deliberately blunt — it can recompute more than needed, never less.
 
 A chunked kind needs `volatile >= chunk + lag` for a second reason. Its job is
@@ -30,12 +30,11 @@ partly ingested for ever while the job reads `done`.
 | kind | what it does | window |
 |---|---|---|
 | `gfw` | fishing effort per vessel-hour | from 2012, 4-day lag |
-| `weather_archive` | ERA5 wind | from 1940, 5-day lag, 14-day chunks |
-| `marine_archive` | currents, waves, swell, tide | from 2022, 5-day lag, 14-day chunks |
-| `forecast` | weather + marine ahead of now | rolling, re-run daily |
+| `cmems` | currents, Stokes drift, waves and wind from Copernicus Marine | from 2022, 10-day chunks, 10 days ahead |
+| `forecast` | wind forecast from Open-Meteo | rolling, re-run daily |
 | `strandings_gbif` | Pelagis archive via GBIF | up to 2022, yearly chunks |
 | `strandings_pelagis` | Pelagis histo-carto | from 2023, 30-day chunks |
-| `drift` | particle simulation per release day | from 2022, 4-day lag |
+| `drift` | OpenDrift simulation per release day | from 2022, 4-day lag |
 | `risk` | probability per segment per day | from 2022, forecast days ahead |
 
 `strandarr status` shows what is queued, what failed, and what is waiting on
@@ -45,13 +44,15 @@ after `MAX_DEFERRALS` so it cannot re-queue itself for ever.
 ## Setup
 
 ```bash
-cp .env.example .env          # then fill in GFW_API_TOKEN and AISSTREAM_API_KEY
+cp .env.example .env          # then fill in GFW_API_TOKEN, AISSTREAM_API_KEY and CMEMS_*
 docker compose up -d          # db, init (migrate + coastline), web, worker, aisstream
 ```
 
 `init` runs `alembic upgrade head` then `strandarr reference`, which fetches the
-Natural Earth coastline and cuts it into ~10 km segments. Every prediction is
-made for one of those segments, so this has to happen before anything else.
+Natural Earth coastline, keeps the French Atlantic and Channel coast, cuts it
+into ~10 km segments, and stores the 0.25° cells of `grid_points.json`. Every
+prediction is made for one of those segments, so this has to happen before
+anything else.
 
 ## Running it
 
@@ -84,13 +85,52 @@ Jobs are claimed oldest day first, because drift for a day feeds the risk of the
 days after it. A long backfill therefore runs ahead of the present: queue it in
 stages (a year at a time) and let each drain, or the live map waits behind it.
 
+Several workers can share the queue (`docker compose up -d --scale worker=6`).
+A job left `running` by a worker that died is released after two hours.
+
+### Backfill cost
+
+From 2022 to today, measured per unit on one worker:
+
+| kind | per unit | total |
+|---|---|---|
+| `cmems` | ~6 min per 10-day chunk | ~17 h |
+| `gfw` | ~20 s per day | ~9 h |
+| `drift` | ~4 min per day | ~5 days |
+| `risk` | < 1 s per day | minutes |
+
+Drift dominates and is CPU-bound, so it scales with workers: six bring the
+whole backfill to about a day.
+
+## The drift model
+
+Each release day, fishing effort becomes carcasses: effort hours weighted by
+gear (trawlers and set gillnets highest), by month (winter highest) and by the
+share of dead animals that float. Each seed is split into particles that
+[OpenDrift](https://opendrift.github.io/) `OceanDrift` carries for 20 days with
+CMEMS IBI surface currents (1/36°, hourly), CMEMS Stokes drift, a windage of
+1.2 % ± 0.4 % of the wind, and 25 m²/s of turbulent diffusion. A particle that
+hits the GSHHG coastline strands there; its weight, decayed with a 12-day
+half-life, is credited to the nearest segment within 15 km on the day it lands.
+
+The CMEMS files live in `FORCING_DIR` (a volume in Compose) only as long as a
+drift day still needs them: after each drift job, files no drift job is waiting
+on and older than the 20-day re-run window are deleted. Re-running old drift
+days (`--kind drift --redo`) therefore needs `--kind cmems --redo` over the same
+span first.
+
+Each CMEMS chunk takes the best dataset that covers it: the multi-year
+reanalysis when it reaches that far, the analysis-forecast (currents, waves) or
+near-real-time (wind) product otherwise. The chunks nearest today are re-opened
+on every schedule, so the forecast part is refreshed.
+
 ## The risk model
 
 Six signals feed a logistic model over a seasonal baseline built from the
 stranding record, leaving out the year being predicted:
 
-`persistence` (recent nearby strandings, decayed) · `drift_index` (what the
-drift model landed here) · `swell_m` · `wave_m` · `onshore_m` (wave push
+`persistence` (recent nearby strandings, decayed) · `drift_index` (what
+OpenDrift landed here over the last three days) · `swell_m` · `wave_m` · `onshore_m` (wave push
 square-on to the shore) · `period_s`
 
 Each goes through the same fixed transform, `log1p(x / scale)`. The scale is
@@ -168,75 +208,33 @@ strandarr/
   db.py                                      engine, session, upsert/replace
   jobs.py                                    the registry, scheduler and worker
   cli.py  web.py                             commands, and the read-only API
-  models/                                    one file per table (7 tables)
+  models/                                    one file per table (10 tables)
   analysis/  geo.py drift.py risk.py         the region, the simulation, the model
   sources/   http.py + one file per source   everything that talks to the outside
   static/                                    MapLibre map, no build step
   coefficients.json                          fitted weights and the index scale
-  grid_points.json                           the cells worth requesting
+  grid_points.json                           the cells worth sampling
 scripts/
-  export-grid.sh                             freeze the grid from a live grid_cell
-  build-grid.py                              or rebuild it from coastline + bathymetry
-  rehearse-migration.sh                      run the migration on a copy of production
+  build-grid.py                              rebuild the cells from coastline + bathymetry
   check-schedule.py                          prove the scheduler leaves no gaps
   backup-db.sh restore-db.sh                 dump and restore
 ```
 
-`grid_points.json` decides which cells are requested: sea cells within
-`MAX_DISTANCE_TO_COAST_KM`, plus land cells within `COASTAL_LAND_MARGIN_KM`.
-Without it every cell within reach of the shore is sampled, inland ones included
-— correct, but roughly twice the requests for rows the marine model cannot fill.
-The worker warns when the file is missing.
-
-## Upgrading a database from before the refactor
-
-The migration chain is four revisions instead of twenty-two:
-
-| revision | |
+| table | holds |
 |---|---|
-| `5f2b94d0e3a8` | the deployed schema, squashed — never runs on a live database |
-| `6a3c72fb1e94` | carried over unchanged: `ingest_coverage` gains its measurements |
-| `7b4d18e6c052` | carried over unchanged: `segment_forecast` + `segment_climatology` become `segment_risk` |
-| `0004_refactor` | the refactor |
+| `coastal_segment` | ~10 km pieces of the French Atlantic and Channel coast |
+| `cell` | the 0.25° cells wind and sea state are stored on |
+| `wind` | hourly wind per cell: CMEMS L4, then the Open-Meteo forecast |
+| `sea` | hourly currents, waves and swell per cell, averaged from CMEMS IBI |
+| `vessel` | one row per fishing vessel (MMSI, name, flag, gear) |
+| `vessel_position` | hourly positions: GFW fishing effort and live AIS |
+| `stranding` | Pelagis records, via GBIF (to 2022) and histo-carto (2023 on) |
+| `drift_daily` | what each release day landed on each segment, per landing day |
+| `segment_risk` | the probability and its signals, per segment per day |
+| `job` | the queue |
 
-A live database joins wherever it is stamped and walks forward; a fresh install
-runs all four and lands on exactly the same schema. **Check where yours is before
-anything else** — `alembic current` — because the chain starts at `5f2b94d0e3a8`
-and cannot migrate a database older than that. One older would need the
-pre-refactor code to bring it up first.
-
-`0004_refactor` keeps everything that cost an API call or a simulation. It merges
-`marine_condition`'s four source rows per cell-hour into one `condition` row,
-archived value first and forecast second — the precedence the old read path
-applied on every query. It keeps `drift_daily` (the drift physics did not change),
-`stranding`, `vessel_position` and `coastal_segment` with their ids intact, and it
-seeds the `job` table from `ingest_coverage` so nothing already fetched is fetched
-again. It drops `segment_risk`, because the new model needs two signals the old
-one never stored and filling them with zeros would corrupt `strandarr fit`; those
-rows are recomputed locally, with no API call. If your database predates
-`7b4d18e6c052`, `segment_forecast` and `segment_climatology` go the same way on
-the same reasoning.
-
-```bash
-scripts/backup-db.sh                      # this dump is the only way back
-scripts/export-grid.sh                    # BEFORE migrating, while grid_cell exists
-
-# rehearse on a copy, never on the live database
-createdb rehearsal && pg_restore -d rehearsal --no-owner backups/strandarr_<ts>.dump
-POSTGRES_DB=rehearsal POSTGRES_HOST=127.0.0.1 scripts/rehearse-migration.sh
-```
-
-Then rename `MARINE_FORECAST_HOURS` to `FORECAST_HOURS` in `.env` — unknown keys
-are ignored rather than rejected, so a stale name fails silently — and bring the
-stack up. Afterwards, backfill `risk` in stages and refit.
-
-`downgrade()` raises: merging the condition sources cannot be undone from what is
-left. Restore the dump.
-
-If `init` exits with `Can't locate revision identified by '<id>'`, the database is
-stamped at a revision this chain does not contain. Nothing has been changed --
-alembic refuses before it writes anything. Check `alembic current` against the
-table above.
+`grid_points.json` decides which cells are sampled: sea cells within
+`MAX_DISTANCE_TO_COAST_KM`, plus land cells within `COASTAL_LAND_MARGIN_KM`.
 
 ## Development
 

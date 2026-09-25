@@ -3,12 +3,13 @@ from datetime import date, datetime, timedelta
 from typing import Any
 
 import httpx
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from strandarr.analysis.geo import GRID, BBox
 from strandarr.config import settings
 from strandarr.db import upsert
-from strandarr.models import VesselPosition
+from strandarr.models import Vessel, VesselPosition
 from strandarr.sources import GFW_FISHING
 from strandarr.sources.http import request_json
 
@@ -51,38 +52,57 @@ def flatten(node: Any) -> list[dict[str, Any]]:
     return []
 
 
-def parse(row: dict[str, Any]) -> VesselPosition | None:
+Position = dict[str, Any]
+
+
+def parse(row: dict[str, Any]) -> Position | None:
     mmsi, lat, lon = row.get("mmsi"), row.get("lat"), row.get("lon")
     recorded_at = row.get("date")
     if not mmsi or lat is None or lon is None or not recorded_at:
         return None
-    return VesselPosition(
-        mmsi=str(mmsi),
-        recorded_at=datetime.fromisoformat(recorded_at.replace("Z", "+00:00")),
-        lat=float(lat),
-        lon=float(lon),
-        source=GFW_FISHING,
-        ship_name=row.get("shipName") or None,
-        flag=row.get("flag") or None,
-        gear_type=row.get("geartype") or None,
-        vessel_type=row.get("vesselType") or None,
-        effort_hours=row.get("hours"),
-    )
+    return {
+        "mmsi": str(mmsi),
+        "recorded_at": datetime.fromisoformat(recorded_at.replace("Z", "+00:00")),
+        "lat": float(lat),
+        "lon": float(lon),
+        "effort_hours": float(row.get("hours") or 0.0),
+        "ship_name": row.get("shipName") or None,
+        "flag": row.get("flag") or None,
+        "gear_type": row.get("geartype") or None,
+        "vessel_type": row.get("vesselType") or None,
+    }
 
 
-def collapse_cells(positions: list[VesselPosition]) -> list[VesselPosition]:
-    best: dict[tuple[str, datetime], VesselPosition] = {}
+def collapse_cells(positions: list[Position]) -> list[Position]:
+    best: dict[tuple[str, datetime], Position] = {}
     total: dict[tuple[str, datetime], float] = {}
     for position in positions:
-        key = (position.mmsi, position.recorded_at)
-        effort = position.effort_hours or 0.0
-        total[key] = total.get(key, 0.0) + effort
+        key = (position["mmsi"], position["recorded_at"])
+        total[key] = total.get(key, 0.0) + position["effort_hours"]
         incumbent = best.get(key)
-        if incumbent is None or effort > (incumbent.effort_hours or 0.0):
+        if incumbent is None or position["effort_hours"] > incumbent["effort_hours"]:
             best[key] = position
     for key, position in best.items():
-        position.effort_hours = total[key]
+        position["effort_hours"] = total[key]
     return list(best.values())
+
+
+def vessels(session: Session, positions: list[Position]) -> dict[str, int]:
+    identities = {
+        position["mmsi"]: {
+            "mmsi": position["mmsi"],
+            **{field: position[field] for field in Vessel.IDENTITY},
+        }
+        for position in positions
+    }
+    if not identities:
+        return {}
+    values = insert(Vessel).values(list(identities.values()))
+    statement = values.on_conflict_do_update(
+        index_elements=["mmsi"],
+        set_={field: values.excluded[field] for field in Vessel.IDENTITY},
+    ).returning(Vessel.mmsi, Vessel.id)
+    return dict(session.execute(statement).tuples().all())
 
 
 def ingest(session: Session, day: date) -> int:
@@ -97,7 +117,23 @@ def ingest(session: Session, day: date) -> int:
         )
     cells = [parsed for row in flatten(payload) if (parsed := parse(row)) is not None]
     positions = collapse_cells(cells)
-    written = upsert(session, VesselPosition, positions, overwrite=True)
+    known = vessels(session, positions)
+    written = upsert(
+        session,
+        VesselPosition,
+        [
+            VesselPosition(
+                vessel_id=known[position["mmsi"]],
+                recorded_at=position["recorded_at"],
+                source=GFW_FISHING,
+                lat=position["lat"],
+                lon=position["lon"],
+                effort_hours=position["effort_hours"],
+            )
+            for position in positions
+        ],
+        overwrite=True,
+    )
     session.commit()
     logger.info(
         "gfw: %s -> %d vessel-hours from %d grid cells", day, written, len(cells)

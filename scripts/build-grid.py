@@ -1,14 +1,10 @@
 #!/usr/bin/env python
 """Rebuild strandarr/grid_points.json from the coastline and a bathymetry source.
 
-`scripts/export-grid.sh` is the fast path: it copies the grid the database already
-uses. This is the slow path, for when GRID_STEP_DEG, MAX_DISTANCE_TO_COAST_KM or
-COASTAL_LAND_MARGIN_KM change and the grid has to be decided again from scratch.
-
-It keeps every sea cell within MAX_DISTANCE_TO_COAST_KM of the shore, plus land
-cells within COASTAL_LAND_MARGIN_KM -- the rule the pre-refactor code applied via
-the grid_cell table. Sea or land comes from GEBCO through Open Topo Data, which is
-why this is a script you run by hand rather than something the worker depends on.
+Run it when GRID_STEP_DEG, MAX_DISTANCE_TO_COAST_KM, COASTAL_LAND_MARGIN_KM or
+the bbox change. It keeps every sea cell within MAX_DISTANCE_TO_COAST_KM of the
+shore, plus land cells within COASTAL_LAND_MARGIN_KM. Sea or land comes from
+GEBCO through Open Topo Data.
 """
 
 import json

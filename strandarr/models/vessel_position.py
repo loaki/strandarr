@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import ClassVar
 
-from sqlalchemy import DateTime, Float, Index, String
+from sqlalchemy import REAL, DateTime, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from strandarr.models.base import Base
@@ -9,20 +9,15 @@ from strandarr.models.base import Base
 
 class VesselPosition(Base):
     __tablename__ = "vessel_position"
-    __table_args__ = (
-        Index("ix_vessel_position_dedup", "mmsi", "recorded_at", unique=True),
-    )
-    __conflict__: ClassVar[tuple[str, ...]] = ("mmsi", "recorded_at")
+    __conflict__: ClassVar[tuple[str, ...]] = ("recorded_at", "vessel_id")
 
     recorded_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, index=True
+        DateTime(timezone=True), primary_key=True
     )
-    source: Mapped[str] = mapped_column(String(32), nullable=False)
-    mmsi: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
-    lat: Mapped[float] = mapped_column(Float, nullable=False)
-    lon: Mapped[float] = mapped_column(Float, nullable=False)
-    ship_name: Mapped[str | None] = mapped_column(String(128))
-    flag: Mapped[str | None] = mapped_column(String(8))
-    gear_type: Mapped[str | None] = mapped_column(String(64))
-    vessel_type: Mapped[str | None] = mapped_column(String(64))
-    effort_hours: Mapped[float | None] = mapped_column(Float)
+    vessel_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("vessel.id", ondelete="CASCADE"), primary_key=True
+    )
+    source: Mapped[str] = mapped_column(String(16), nullable=False)
+    lat: Mapped[float] = mapped_column(REAL, nullable=False)
+    lon: Mapped[float] = mapped_column(REAL, nullable=False)
+    effort_hours: Mapped[float | None] = mapped_column(REAL)

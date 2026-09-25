@@ -17,7 +17,7 @@ from strandarr.analysis.geo import SegmentIndex, coast, load_segments
 from strandarr.config import settings
 from strandarr.db import replace
 from strandarr.errors import NotReady
-from strandarr.models import Condition, DriftDaily, SegmentRisk, Stranding
+from strandarr.models import Cell, DriftDaily, Sea, SegmentRisk, Stranding
 from strandarr.timeframe import DayRange, day_of
 
 logger = logging.getLogger(__name__)
@@ -299,34 +299,26 @@ def onshore(index: SegmentIndex, east: Float, north: Float) -> Float:
 def sea_state(session: Session, index: SegmentIndex, day: date) -> dict[str, Float]:
     seen = day - timedelta(days=LAG_DAYS)
     start, end = DayRange.of(seen).bounds()
-    wave = Condition.wave_height_m
-    heading = func.radians(Condition.wave_direction_deg + 180.0)
+    wave = Sea.wave_height_m
+    heading = func.radians(Sea.wave_direction_deg + 180.0)
     rows = session.execute(
         select(
-            Condition.lat,
-            Condition.lon,
-            func.avg(Condition.swell_height_m),
+            Cell.lat,
+            Cell.lon,
+            func.avg(Sea.swell_height_m),
             func.avg(wave),
-            func.avg(Condition.wave_period_s),
+            func.avg(Sea.wave_period_s),
             func.avg(wave * func.sin(heading)),
             func.avg(wave * func.cos(heading)),
         )
-        .where(
-            Condition.valid_at >= start,
-            Condition.valid_at < end,
-            # Marine cells only. condition holds one row per cell-hour with wind
-            # and sea state side by side, so a day the weather archive has reached
-            # but the marine archive has not still returns rows -- and averaging
-            # their NULLs as zero would score the day against a flat calm that
-            # never happened.
-            Condition.wave_height_m.isnot(None),
-        )
-        .group_by(Condition.lat, Condition.lon)
+        .join(Cell, Cell.id == Sea.cell_id)
+        .where(Sea.valid_at >= start, Sea.valid_at < end)
+        .group_by(Cell.lat, Cell.lon)
     ).all()
     if not rows:
         raise NotReady(
             f"no sea state stored for {seen}, needed to score {day}: "
-            "the marine archive has not reached that day"
+            "the cmems job has not reached that day"
         )
 
     kernel = spatial_weights(

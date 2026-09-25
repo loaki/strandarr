@@ -14,6 +14,7 @@ class Stranding(Base):
     )
     __conflict__: ClassVar[tuple[str, ...]] = ("source", "external_id")
 
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     recorded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, index=True
     )
@@ -24,6 +25,3 @@ class Stranding(Base):
     species_scientific: Mapped[str | None] = mapped_column(String(255))
     species_common: Mapped[str | None] = mapped_column(String(255))
     individual_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
-    coordinate_uncertainty_m: Mapped[float | None] = mapped_column(Float)
-    time_uncertainty_hours: Mapped[float | None] = mapped_column(Float)
-    location_precision: Mapped[str | None] = mapped_column(String(32))

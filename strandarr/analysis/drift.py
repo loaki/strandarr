@@ -1,20 +1,21 @@
 import logging
-import math
-import warnings
-from collections.abc import Iterable, Iterator, Sequence
+import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any
 
 import numpy as np
-from sqlalchemy import Integer, func, select
+import xarray as xr
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from strandarr.analysis import Float
 from strandarr.analysis.geo import GRID, Coast, coast, load_segments
 from strandarr.db import replace
 from strandarr.errors import NotReady
-from strandarr.models import Condition, DriftDaily, VesselPosition
+from strandarr.models import Cell, DriftDaily, Vessel, VesselPosition, Wind
+from strandarr.sources import cmems
 from strandarr.timeframe import DayRange, midnight
 
 logger = logging.getLogger(__name__)
@@ -25,11 +26,8 @@ HORIZONTAL_DIFFUSIVITY_M2S = 25.0
 BUOYANCY_RATE = 0.31
 FLOAT_HALF_LIFE_DAYS = 12.0
 MAX_DRIFT_DAYS = 20
-BEACHING_DISTANCE_KM = 6.0
-BEACHING_RATE_PER_HOUR = 0.06
-TIDE_GAIN = 0.6
-WAVE_GAIN = 0.8
-WAVE_REFERENCE_M = 3.0
+SNAP_KM = 15.0
+TIME_STEP_SECONDS = 3600
 
 GEAR_WEIGHTS: dict[str, float] = {
     "trawlers": 1.0,
@@ -67,171 +65,11 @@ SEASON_WEIGHTS: tuple[float, ...] = (
 BYCATCH_PER_EFFORT_HOUR = 1.0
 DETECTION_RATE = 1.0
 
-PARTICLES_PER_SEED = 32
+PARTICLES_PER_SEED = 16
 MAX_PARTICLES = 400_000
-MIN_PARTICLES_PER_SEED = 6
+MIN_PARTICLES_PER_SEED = 4
 WEIGHT_FLOOR = 1e-9
-
-METRES_PER_DEGREE = 111_320.0
-SECONDS_PER_STEP = 3600.0
-
-DRIFT_HOURS = MAX_DRIFT_DAYS * 24
-
-MEASUREMENTS = (
-    "current_speed_kmh",
-    "current_direction_deg",
-    "wind_speed_kmh",
-    "wind_direction_deg",
-    "sea_level_m",
-    "wave_height_m",
-)
-
-BATCH_ROWS = 100_000
-
-
-def window(day: date) -> tuple[datetime, datetime]:
-    start = midnight(day)
-    return start, start + timedelta(days=MAX_DRIFT_DAYS)
-
-
-@dataclass(frozen=True)
-class Forcing:
-    hours: int
-    archived_hours: int
-    lats: Float
-    lons: Float
-    fields: Float
-
-    def sample(self, step: int, lat: Float, lon: Float) -> Float:
-        span = GRID.step_deg
-        row = (lat - self.lats[0]) / span
-        column = (lon - self.lons[0]) / span
-        row0 = np.clip(np.floor(row), 0, len(self.lats) - 2).astype(np.int32)
-        col0 = np.clip(np.floor(column), 0, len(self.lons) - 2).astype(np.int32)
-        fr = np.clip(row - row0, 0.0, 1.0)
-        fc = np.clip(column - col0, 0.0, 1.0)
-
-        plane = self.fields[:, step]
-        top = plane[:, row0, col0] * (1 - fc) + plane[:, row0, col0 + 1] * fc
-        bottom = plane[:, row0 + 1, col0] * (1 - fc) + plane[:, row0 + 1, col0 + 1] * fc
-        return np.asarray(top * (1 - fr) + bottom * fr, dtype=np.float64)
-
-
-def read_forcing(session: Session, day: date) -> Iterator[Sequence[Sequence[Any]]]:
-    start, end = window(day)
-    hour = func.floor(func.extract("epoch", Condition.valid_at - start) / 3600).cast(
-        Integer
-    )
-    statement = select(
-        hour,
-        Condition.forecast,
-        Condition.lat,
-        Condition.lon,
-        *(getattr(Condition, name) for name in MEASUREMENTS),
-    ).where(Condition.valid_at >= start, Condition.valid_at < end)
-    return iter(
-        session.execute(statement.execution_options(yield_per=BATCH_ROWS)).partitions()
-    )
-
-
-def build_forcing(batches: Iterable[Sequence[Sequence[Any]]]) -> Forcing:
-    lat_axis, lon_axis = GRID.axes()
-    lats = np.asarray(lat_axis, dtype=np.float64)
-    lons = np.asarray(lon_axis, dtype=np.float64)
-    raw = np.full((len(MEASUREMENTS), DRIFT_HOURS, len(lats), len(lons)), np.nan)
-
-    width = 4 + len(MEASUREMENTS)
-    columns: list[list[Any]] = [[] for _ in range(width)]
-    for batch in batches:
-        for column, incoming in zip(columns, zip(*batch, strict=True), strict=True):
-            column.extend(incoming)
-
-    present: set[int] = set()
-    archived: set[int] = set()
-    if columns[0]:
-        span = GRID.step_deg
-        hour = np.asarray(columns[0], dtype=np.int64)
-        live = np.asarray(columns[1], dtype=bool)
-        i = np.rint((np.asarray(columns[2], dtype=np.float64) - lats[0]) / span)
-        j = np.rint((np.asarray(columns[3], dtype=np.float64) - lons[0]) / span)
-        inside = (
-            (hour >= 0)
-            & (hour < DRIFT_HOURS)
-            & (i >= 0)
-            & (i < len(lats))
-            & (j >= 0)
-            & (j < len(lons))
-        )
-        hour, live = hour[inside], live[inside]
-        i = i[inside].astype(np.int64)
-        j = j[inside].astype(np.int64)
-        for offset in range(len(MEASUREMENTS)):
-            values = np.asarray(columns[4 + offset], dtype=np.float64)[inside]
-            known = ~np.isnan(values)
-            raw[offset][hour[known], i[known], j[known]] = values[known]
-        present = set(hour.tolist())
-        archived = set(hour[~live].tolist())
-
-    speed, course, wind_speed, wind_course, sea_level, wave = raw
-    current = np.nan_to_num(speed, nan=0.0) / 3.6
-    heading = np.radians(np.nan_to_num(course, nan=0.0))
-    wind = np.nan_to_num(wind_speed, nan=0.0) / 3.6
-    blowing = np.radians(np.nan_to_num(wind_course, nan=0.0) + 180.0)
-
-    return Forcing(
-        hours=_contiguous(present),
-        archived_hours=_contiguous(archived),
-        lats=lats,
-        lons=lons,
-        fields=np.asarray(
-            [
-                _fill_gaps(current * np.sin(heading)),
-                _fill_gaps(current * np.cos(heading)),
-                _fill_gaps(wind * np.sin(blowing)),
-                _fill_gaps(wind * np.cos(blowing)),
-                _standardise(sea_level),
-                _fill_gaps(np.nan_to_num(wave, nan=0.0)),
-            ]
-        ),
-    )
-
-
-def _contiguous(hours: set[int]) -> int:
-    hour = 0
-    while hour < DRIFT_HOURS and hour in hours:
-        hour += 1
-    return hour
-
-
-def _fill_gaps(field: Float, passes: int = 6) -> Float:
-    filled = field.copy()
-    for _ in range(passes):
-        holes = filled == 0.0
-        if not holes.any():
-            break
-        padded = np.pad(filled, ((0, 0), (1, 1), (1, 1)), mode="edge")
-        sides = np.stack(
-            (
-                padded[:, :-2, 1:-1],
-                padded[:, 2:, 1:-1],
-                padded[:, 1:-1, :-2],
-                padded[:, 1:-1, 2:],
-            )
-        )
-        neighbours = sides.sum(axis=0)
-        counts = (sides != 0.0).sum(axis=0)
-        usable = holes & (counts > 0)
-        filled[usable] = neighbours[usable] / counts[usable]
-    return filled
-
-
-def _standardise(sea_level: Float) -> Float:
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", RuntimeWarning)
-        mean = np.nanmean(sea_level, axis=0, keepdims=True)
-        spread = np.nanstd(sea_level, axis=0, keepdims=True)
-    z = (sea_level - mean) / np.where(spread > 1e-6, spread, 1.0)
-    return np.clip(np.nan_to_num(z, nan=0.0), -2.0, 2.0)
+FILL_PASSES = 6
 
 
 @dataclass(frozen=True)
@@ -274,186 +112,191 @@ def seeds(positions: Sequence[Any], day: date) -> list[Seed]:
     ]
 
 
-@dataclass(frozen=True)
-class Arrival:
-    segment_id: int
-    hour: int
-    drift_index: float
+def _fill(field: Float) -> Float:
+    filled = field.copy()
+    for _ in range(FILL_PASSES):
+        holes = np.isnan(filled)
+        if not holes.any():
+            break
+        padded = np.pad(filled, ((0, 0), (1, 1), (1, 1)), constant_values=np.nan)
+        sides = np.stack(
+            (
+                padded[:, :-2, 1:-1],
+                padded[:, 2:, 1:-1],
+                padded[:, 1:-1, :-2],
+                padded[:, 1:-1, 2:],
+            )
+        )
+        counts = np.isfinite(sides).sum(axis=0)
+        means = np.nansum(sides, axis=0) / np.maximum(counts, 1)
+        usable = holes & (counts > 0)
+        filled[usable] = means[usable]
+    return np.nan_to_num(filled)
+
+
+def wind_field(session: Session, start: datetime, end: datetime) -> xr.Dataset:
+    lat_axis, lon_axis = GRID.axes()
+    lats = np.asarray(lat_axis, dtype=np.float64)
+    lons = np.asarray(lon_axis, dtype=np.float64)
+    hours = int((end - start).total_seconds() // 3600)
+    east = np.full((hours, len(lats), len(lons)), np.nan)
+    north = np.full_like(east, np.nan)
+    rows = session.execute(
+        select(Wind.valid_at, Cell.lat, Cell.lon, Wind.speed_kmh, Wind.direction_deg)
+        .join(Cell, Cell.id == Wind.cell_id)
+        .where(Wind.valid_at >= start, Wind.valid_at < end)
+    ).all()
+    if rows:
+        hour = np.array([int((row[0] - start).total_seconds() // 3600) for row in rows])
+        i = np.rint((np.array([row[1] for row in rows]) - lats[0]) / GRID.step_deg)
+        j = np.rint((np.array([row[2] for row in rows]) - lons[0]) / GRID.step_deg)
+        speed = np.array([row[3] for row in rows], dtype=np.float64) / 3.6
+        blowing = np.radians(np.array([row[4] for row in rows], dtype=np.float64) + 180)
+        east[hour, i.astype(int), j.astype(int)] = speed * np.sin(blowing)
+        north[hour, i.astype(int), j.astype(int)] = speed * np.cos(blowing)
+    times = np.array(
+        [
+            np.datetime64(start.replace(tzinfo=None) + timedelta(hours=h))
+            for h in range(hours)
+        ],
+        dtype="datetime64[ns]",
+    )
+    return xr.Dataset(
+        {
+            "x_wind": (
+                ("time", "lat", "lon"),
+                _fill(east),
+                {"standard_name": "x_wind"},
+            ),
+            "y_wind": (
+                ("time", "lat", "lon"),
+                _fill(north),
+                {"standard_name": "y_wind"},
+            ),
+        },
+        coords={
+            "time": ("time", times),
+            "lat": ("lat", lats, {"standard_name": "latitude"}),
+            "lon": ("lon", lons, {"standard_name": "longitude"}),
+        },
+    )
 
 
 @dataclass(frozen=True)
 class Result:
-    arrivals: list[Arrival]
+    landed: dict[tuple[date, int], float]
     particles: int
-    released_weight: float
-    stranded_weight: float
+    released: float
+    stranded: float
     hours: int
-    archived_hours: int
-
-    @property
-    def settled(self) -> bool:
-        return self.archived_hours >= DRIFT_HOURS
 
 
 def simulate(
     seed_list: Sequence[Seed],
-    forcing: Forcing,
+    readers: list[Any],
+    start: datetime,
+    end: datetime,
     shore: Coast,
-    rng: np.random.Generator | None = None,
 ) -> Result:
-    generator = rng if rng is not None else np.random.default_rng(0)
-    steps = min(DRIFT_HOURS, forcing.hours)
-    if not seed_list or steps <= 0:
-        return Result([], 0, 0.0, 0.0, forcing.hours, forcing.archived_hours)
-
+    hours = int((end - start).total_seconds() // 3600)
+    if not seed_list:
+        return Result({}, 0, 0.0, 0.0, hours)
+    rng = np.random.default_rng(0)
     per_seed = max(
         MIN_PARTICLES_PER_SEED, min(PARTICLES_PER_SEED, MAX_PARTICLES // len(seed_list))
     )
     count = len(seed_list) * per_seed
     jitter = GRID.step_deg / 2
-
     birth = np.repeat([seed.hour for seed in seed_list], per_seed)
-    lat = np.repeat([seed.lat for seed in seed_list], per_seed) + generator.uniform(
-        -jitter, jitter, count
-    )
-    lon = np.repeat([seed.lon for seed in seed_list], per_seed) + generator.uniform(
-        -jitter, jitter, count
-    )
+    lat = np.repeat([seed.lat for seed in seed_list], per_seed)
+    lon = np.repeat([seed.lon for seed in seed_list], per_seed)
     weight = np.repeat([seed.weight for seed in seed_list], per_seed) / per_seed
-    windage = np.clip(
-        generator.normal(WIND_DRIFT_FACTOR, WIND_DRIFT_SPREAD, count), 0.0, None
+    windage = np.clip(rng.normal(WIND_DRIFT_FACTOR, WIND_DRIFT_SPREAD, count), 0, None)
+    naive = start.replace(tzinfo=None)
+
+    from opendrift.models.oceandrift import OceanDrift
+
+    model = OceanDrift(loglevel=50)
+    model.add_reader(readers)
+    model.set_config("general:coastline_action", "stranding")
+    model.set_config("drift:advection_scheme", "runge-kutta")
+    model.set_config("drift:stokes_drift", True)
+    model.set_config(
+        "environment:constant:horizontal_diffusivity", HORIZONTAL_DIFFUSIVITY_M2S
+    )
+    model.set_config("environment:fallback:x_sea_water_velocity", None)
+    model.set_config("environment:fallback:y_sea_water_velocity", None)
+    model.seed_elements(
+        lon=lon + rng.uniform(-jitter, jitter, count),
+        lat=lat + rng.uniform(-jitter, jitter, count),
+        time=[naive + timedelta(hours=int(h)) for h in birth],
+        wind_drift_factor=windage,
+        z=0,
+    )
+    model.run(
+        end_time=end.replace(tzinfo=None),
+        time_step=TIME_STEP_SECONDS,
+        time_step_output=hours * 3600,
     )
 
-    released = float(weight.sum())
-    alive = np.zeros(count, dtype=bool)
-    moored = np.zeros(count, dtype=bool)
-    moor_segment = np.full(count, -1, dtype=np.int32)
-    deposits = np.zeros((len(shore.segment_ids), steps))
-
-    min_lon, min_lat, max_lon, max_lat = GRID.bbox.corners()
-    decay = 0.5 ** (1.0 / (FLOAT_HALF_LIFE_DAYS * 24.0))
-    walk = math.sqrt(2 * HORIZONTAL_DIFFUSIVITY_M2S * SECONDS_PER_STEP)
-    last_birth = int(birth.max())
-
-    for step in range(steps):
-        alive |= birth == step
-        active = alive & (weight > WEIGHT_FLOOR)
-        if not active.any():
-            if step > last_birth:
-                break
-            continue
-
-        index = np.flatnonzero(active)
-        here_lat, here_lon = lat[index], lon[index]
-        gust = windage[index]
-
-        current_u, current_v, wind_u, wind_v, tide, wave = forcing.sample(
-            step, here_lat, here_lon
-        )
-        east = current_u + gust * wind_u
-        north = current_v + gust * wind_v
-
-        scale = max(math.cos(math.radians(float(np.mean(here_lat)))), 0.1)
-        half = SECONDS_PER_STEP / 2
-        mid_u, mid_v, mid_wu, mid_wv, _, _ = forcing.sample(
-            step,
-            here_lat + north * half / METRES_PER_DEGREE,
-            here_lon + east * half / (METRES_PER_DEGREE * scale),
-        )
-        east = 0.5 * (east + mid_u + gust * mid_wu)
-        north = 0.5 * (north + mid_v + gust * mid_wv)
-
-        cos_lat = np.maximum(np.cos(np.radians(here_lat)), 0.1)
-        next_lat = (
-            here_lat
-            + (north * SECONDS_PER_STEP + generator.normal(0.0, walk, len(index)))
-            / METRES_PER_DEGREE
-        )
-        next_lon = here_lon + (
-            east * SECONDS_PER_STEP + generator.normal(0.0, walk, len(index))
-        ) / (METRES_PER_DEGREE * cos_lat)
-
-        segment, distance = shore.lookup(next_lat, next_lon)
-        arrived = (segment >= 0) & (distance <= BEACHING_DISTANCE_KM)
-        held = moored[index]
-        leaving = held & ~arrived
-        if leaving.any():
-            next_lat = np.where(leaving, here_lat, next_lat)
-            next_lon = np.where(leaving, here_lon, next_lon)
-            segment = np.where(leaving, moor_segment[index], segment)
-        near = arrived | held
-
-        lat[index] = next_lat
-        lon[index] = next_lon
-        weight[index] *= decay
-
-        landing = index[near]
-        if landing.size:
-            chance = (
-                BEACHING_RATE_PER_HOUR
-                * (1.0 + TIDE_GAIN * tide[near] / 2.0)
-                * (1.0 + WAVE_GAIN * np.clip(wave[near] / WAVE_REFERENCE_M, 0.0, 1.0))
-            )
-            landed = weight[landing] * np.clip(chance, 0.0, 1.0)
-            weight[landing] -= landed
-            np.add.at(deposits[:, step], segment[near], landed)
-
-            fresh = arrived & ~held
-            moored[index[fresh]] = True
-            moor_segment[index[fresh]] = segment[fresh]
-
-        escaped = ~near & (
-            (next_lat < min_lat)
-            | (next_lat > max_lat)
-            | (next_lon < min_lon)
-            | (next_lon > max_lon)
-        )
-        if escaped.any():
-            alive[index[escaped]] = False
-
-    where, hours = np.nonzero(deposits > WEIGHT_FLOOR)
+    gone = model.elements_deactivated
+    stranded = gone.status == model.status_categories.index("stranded")
+    index = gone.ID[stranded].astype(np.int64) - 1
+    age_hours = gone.age_seconds[stranded] / 3600.0
+    landed_weight = weight[index] * 0.5 ** (age_hours / (FLOAT_HALF_LIFE_DAYS * 24))
+    landed_hour = birth[index] + age_hours
+    segment, distance = shore.lookup(
+        np.asarray(gone.lat[stranded], dtype=np.float64),
+        np.asarray(gone.lon[stranded], dtype=np.float64),
+    )
+    near = (segment >= 0) & (distance <= SNAP_KM)
+    landed: dict[tuple[date, int], float] = {}
+    for position, hour, value in zip(
+        segment[near], landed_hour[near], landed_weight[near], strict=True
+    ):
+        key = ((start + timedelta(hours=float(hour))).date(), int(position))
+        landed[key] = landed.get(key, 0.0) + float(value)
     return Result(
-        arrivals=[
-            Arrival(
-                segment_id=shore.segment_ids[segment],
-                hour=int(hour),
-                drift_index=float(deposits[segment, hour]),
-            )
-            for segment, hour in zip(where, hours, strict=True)
-        ],
+        landed=landed,
         particles=count,
-        released_weight=released,
-        stranded_weight=float(deposits.sum()),
-        hours=forcing.hours,
-        archived_hours=forcing.archived_hours,
+        released=float(weight.sum()),
+        stranded=float(landed_weight[near].sum()),
+        hours=hours,
     )
 
 
 def run(session: Session, day: date) -> int:
-    start, end = DayRange.of(day).bounds()
-    positions = list(
-        session.execute(
-            select(VesselPosition).where(
-                VesselPosition.recorded_at >= start, VesselPosition.recorded_at < end
-            )
-        ).scalars()
-    )
+    start, stop = DayRange.of(day).bounds()
+    positions = session.execute(
+        select(
+            VesselPosition.recorded_at,
+            VesselPosition.lat,
+            VesselPosition.lon,
+            VesselPosition.effort_hours,
+            Vessel.gear_type,
+        )
+        .join(Vessel, Vessel.id == VesselPosition.vessel_id)
+        .where(VesselPosition.recorded_at >= start, VesselPosition.recorded_at < stop)
+    ).all()
     if not positions:
         raise NotReady(f"no vessel positions stored for {day}")
 
-    index = load_segments(session)
-    result = simulate(
-        seeds(positions, day),
-        build_forcing(read_forcing(session, day)),
-        coast(index, BEACHING_DISTANCE_KM),
-    )
+    horizon = start + timedelta(days=MAX_DRIFT_DAYS)
+    files, end = cmems.forcing(start, horizon)
+    needed = min(horizon, midnight(date.today()))
+    if end < max(needed, stop):
+        raise NotReady(
+            f"CMEMS forcing for {day} reaches {end:%Y-%m-%d %H:%M}, "
+            f"needs {max(needed, stop):%Y-%m-%d %H:%M}"
+        )
 
-    released_at = midnight(day)
-    totals: dict[tuple[date, int], float] = {}
-    for arrival in result.arrivals:
-        landed = (released_at + timedelta(hours=arrival.hour)).date()
-        key = (landed, arrival.segment_id)
-        totals[key] = totals.get(key, 0.0) + arrival.drift_index
+    from opendrift.readers import reader_netCDF_CF_generic
+
+    index = load_segments(session)
+    started = time.monotonic()
+    readers = [reader_netCDF_CF_generic.Reader(str(file)) for file in files]
+    readers.append(reader_netCDF_CF_generic.Reader(wind_field(session, start, end)))
+    result = simulate(seeds(positions, day), readers, start, end, coast(index, SNAP_KM))
 
     replace(
         session,
@@ -462,25 +305,24 @@ def run(session: Session, day: date) -> int:
             DriftDaily(
                 release_day=day,
                 day=landed,
-                coastal_segment_id=segment_id,
+                coastal_segment_id=index.ids[position],
                 drift_index=value,
             )
-            for (landed, segment_id), value in totals.items()
+            for (landed, position), value in result.landed.items()
         ],
         DriftDaily.release_day == day,
     )
     session.commit()
-
     logger.info(
         "drift %s: %d particle(s), %.3f released -> %.3f stranded on %d segment-day(s), "
-        "%dh of forcing (%dh archived)%s",
+        "%dh of forcing in %.0fs%s",
         day,
         result.particles,
-        result.released_weight,
-        result.stranded_weight,
-        len(totals),
+        result.released,
+        result.stranded,
+        len(result.landed),
         result.hours,
-        result.archived_hours,
-        "" if result.settled else ", provisional",
+        time.monotonic() - started,
+        "" if result.hours >= MAX_DRIFT_DAYS * 24 else ", provisional",
     )
-    return len(totals)
+    return len(result.landed)

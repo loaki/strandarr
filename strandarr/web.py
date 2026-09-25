@@ -13,11 +13,14 @@ from strandarr.analysis import risk
 from strandarr.analysis.risk import SIGNALS
 from strandarr.db import Session
 from strandarr.models import (
+    Cell,
     CoastalSegment,
-    Condition,
+    Sea,
     SegmentRisk,
     Stranding,
+    Vessel,
     VesselPosition,
+    Wind,
 )
 from strandarr.timeframe import DayRange
 
@@ -35,16 +38,12 @@ Day = Annotated[date, Query()]
 
 VESSEL_FIELDS = (
     "mmsi",
-    "lat",
-    "lon",
     "ship_name",
     "flag",
     "gear_type",
     "vessel_type",
-    "effort_hours",
-    "recorded_at",
-    "source",
 )
+POSITION_FIELDS = ("lat", "lon", "effort_hours", "recorded_at", "source")
 
 STRANDING_FIELDS = (
     "lat",
@@ -53,14 +52,10 @@ STRANDING_FIELDS = (
     "species_common",
     "individual_count",
     "recorded_at",
-    "time_uncertainty_hours",
-    "coordinate_uncertainty_m",
-    "location_precision",
     "source",
     "external_id",
 )
 
-SEA_STATE_FIELDS = Condition.MEASUREMENTS
 
 app = FastAPI(title="strandarr")
 
@@ -89,7 +84,7 @@ def _rows(items: Sequence[Any], fields: Sequence[str]) -> list[dict[str, Any]]:
 def get_range(db: Db) -> dict[str, datetime | None]:
     bounds = [
         db.execute(select(func.min(column), func.max(column))).one()
-        for column in (Condition.valid_at, VesselPosition.recorded_at)
+        for column in (Wind.valid_at, VesselPosition.recorded_at)
     ]
     lows = [low for low, _ in bounds if low is not None]
     highs = [high for _, high in bounds if high is not None]
@@ -166,7 +161,11 @@ def get_strandings_monthly(db: Db) -> list[dict[str, Any]]:
     year = func.extract("year", Stranding.recorded_at)
     month = func.extract("month", Stranding.recorded_at)
     rows = db.execute(
-        select(year.label("year"), month.label("month"), func.sum(Stranding.individual_count))
+        select(
+            year.label("year"),
+            month.label("month"),
+            func.sum(Stranding.individual_count),
+        )
         .group_by(year, month)
         .order_by(year, month)
     ).all()
@@ -184,7 +183,8 @@ def get_strandings_monthly(db: Db) -> list[dict[str, Any]]:
         {
             "year": year_number,
             "months": [
-                None if year_number == latest_year and m > latest_month
+                None
+                if year_number == latest_year and m > latest_month
                 else months.get(m, 0)
                 for m in range(1, 13)
             ],
@@ -197,33 +197,57 @@ def get_strandings_monthly(db: Db) -> list[dict[str, Any]]:
 def get_vessels(at: Hour, db: Db) -> list[dict[str, Any]]:
     start, end = _window(at)
     rows = db.execute(
-        select(VesselPosition).where(
-            VesselPosition.recorded_at >= start, VesselPosition.recorded_at < end
-        )
-    ).scalars()
-    return _rows(list(rows), VESSEL_FIELDS)
+        select(VesselPosition, Vessel)
+        .join(Vessel, Vessel.id == VesselPosition.vessel_id)
+        .where(VesselPosition.recorded_at >= start, VesselPosition.recorded_at < end)
+    ).all()
+    return [
+        {**_rows([position], POSITION_FIELDS)[0], **_rows([vessel], VESSEL_FIELDS)[0]}
+        for position, vessel in rows
+    ]
 
 
 @app.get("/api/conditions")
 def get_conditions(at: Hour, db: Db) -> list[dict[str, Any]]:
     start, end = _window(at)
-    rows = db.execute(
+    cells: dict[int, dict[str, Any]] = {}
+
+    def cell(cell_id: int, lat: float, lon: float) -> dict[str, Any]:
+        return cells.setdefault(cell_id, {"lat": lat, "lon": lon, "forecast": False})
+
+    for cell_id, lat, lon, forecast, speed, direction in db.execute(
         select(
-            Condition.lat,
-            Condition.lon,
-            Condition.forecast,
-            *(getattr(Condition, name) for name in SEA_STATE_FIELDS),
-        ).where(Condition.valid_at >= start, Condition.valid_at < end)
-    ).all()
-    return [
-        {
-            "lat": row[0],
-            "lon": row[1],
-            "forecast": row[2],
-            **dict(zip(SEA_STATE_FIELDS, row[3:], strict=True)),
-        }
-        for row in rows
-    ]
+            Cell.id,
+            Cell.lat,
+            Cell.lon,
+            Wind.forecast,
+            Wind.speed_kmh,
+            Wind.direction_deg,
+        )
+        .join(Wind, Wind.cell_id == Cell.id)
+        .where(Wind.valid_at >= start, Wind.valid_at < end)
+    ).all():
+        row = cell(cell_id, lat, lon)
+        row.update(wind_speed_kmh=speed, wind_direction_deg=direction)
+        row["forecast"] |= forecast
+
+    for cell_id, lat, lon, forecast, *values in db.execute(
+        select(
+            Cell.id,
+            Cell.lat,
+            Cell.lon,
+            Sea.forecast,
+            *(getattr(Sea, name) for name in Sea.MEASUREMENTS),
+        )
+        .join(Sea, Sea.cell_id == Cell.id)
+        .where(Sea.valid_at >= start, Sea.valid_at < end)
+    ).all():
+        row = cell(cell_id, lat, lon)
+        row.update(zip(Sea.MEASUREMENTS, values, strict=True))
+        row["forecast"] |= forecast
+
+    fields = ("wind_speed_kmh", "wind_direction_deg", *Sea.MEASUREMENTS)
+    return [{**dict.fromkeys(fields), **row} for row in cells.values()]
 
 
 app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")

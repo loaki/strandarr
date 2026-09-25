@@ -13,7 +13,8 @@ from sqlalchemy.orm import Session
 
 from strandarr.analysis import Float, Int
 from strandarr.config import settings
-from strandarr.models import CoastalSegment
+from strandarr.db import upsert
+from strandarr.models import Cell, CoastalSegment
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +89,36 @@ def densify(line: list[Point], spacing_km: float) -> Iterator[Point]:
         yield end
 
 
-BBOX = BBox(-6.0, 42.0, 9.5, 51.5)
+BBOX = BBox(-6.0, 43.25, 2.75, 51.5)
+
+FRENCH_COAST: tuple[Point, ...] = (
+    (43.2, -1.785),
+    (43.45, -1.785),
+    (44.0, -6.0),
+    (48.9, -6.0),
+    (49.0, -3.0),
+    (48.95, -2.0),
+    (49.05, -1.9),
+    (49.55, -1.85),
+    (49.75, -2.05),
+    (49.9, -2.05),
+    (50.4, 1.3),
+    (50.95, 1.45),
+    (51.1, 1.75),
+    (51.35, 2.6),
+    (43.2, 2.6),
+)
+
+
+def in_french_coast(lat: float, lon: float) -> bool:
+    inside = False
+    for (lat1, lon1), (lat2, lon2) in pairwise((*FRENCH_COAST, FRENCH_COAST[0])):
+        if (lat1 > lat) != (lat2 > lat):
+            crossing = lon1 + (lat - lat1) * (lon2 - lon1) / (lat2 - lat1)
+            if lon < crossing:
+                inside = not inside
+    return inside
+
 
 COORD_DECIMALS = 4
 
@@ -209,6 +239,21 @@ def grid_points(segments: "SegmentIndex") -> list[Point]:
         _points.clear()
         _points[segments.ids] = cached
     return cached
+
+
+def build_cells(session: Session) -> int:
+    points = grid_points(load_segments(session))
+    written = upsert(session, Cell, [Cell(lat=lat, lon=lon) for lat, lon in points])
+    session.commit()
+    logger.info("grid: %d cell(s) stored", written)
+    return written
+
+
+def load_cells(session: Session) -> list[tuple[int, float, float]]:
+    rows = session.execute(select(Cell.id, Cell.lat, Cell.lon).order_by(Cell.id)).all()
+    if not rows:
+        raise RuntimeError("no cells stored: run `strandarr reference`")
+    return [(row[0], float(row[1]), float(row[2])) for row in rows]
 
 
 def sampled_points(index: NearestIndex) -> list[Point]:

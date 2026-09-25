@@ -12,6 +12,7 @@ from strandarr.analysis.geo import (
     Point,
     bearing_deg,
     distance_km,
+    in_french_coast,
 )
 from strandarr.db import upsert
 from strandarr.models import CoastalSegment
@@ -78,7 +79,7 @@ def _segments(line: list[Point]) -> list[CoastalSegment]:
             length = 0.0
     if len(points) > 1 and length >= SEGMENT_LENGTH_KM / 2:
         closed.append(_segment(points, length))
-    return [s for s in closed if GRID.bbox.contains(s.center_lat, s.center_lon)]
+    return [s for s in closed if in_french_coast(s.center_lat, s.center_lon)]
 
 
 def _segment(points: list[Point], length_km: float) -> CoastalSegment:
