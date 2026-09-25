@@ -301,28 +301,28 @@ def archive(session: Session, days: DayRange) -> int:
     return written
 
 
-def forcing(start: datetime, end: datetime) -> tuple[list[Path], datetime]:
+def forcing(start: datetime, end: datetime) -> tuple[list[Path], list[Path], datetime]:
     first = chunk_of(start.date())
     chunks = []
     chunk = first
     while midnight(chunk) < end:
         chunks.append(chunk)
         chunk += timedelta(days=DAYS_PER_CHUNK)
-    files: list[Path] = []
+    currents: list[Path] = []
+    waves: list[Path] = []
     reached = start
     for chunk in chunks:
         current, wave = path(CURRENTS, chunk), path(WAVES, chunk)
         if not current.exists() or not wave.exists():
             break
-        with xr.open_dataset(current) as currents, xr.open_dataset(wave) as waves:
-            last = min(
-                _instant(currents.time.values[-1]), _instant(waves.time.values[-1])
-            )
-        files += [current, wave]
+        with xr.open_dataset(current) as flow, xr.open_dataset(wave) as sea:
+            last = min(_instant(flow.time.values[-1]), _instant(sea.time.values[-1]))
+        currents.append(current)
+        waves.append(wave)
         reached = last + timedelta(hours=1)
         if reached < midnight(chunk + timedelta(days=DAYS_PER_CHUNK)):
             break
-    return files, min(reached, end)
+    return currents, waves, min(reached, end)
 
 
 def prune(keep_from: date) -> int:

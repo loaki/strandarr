@@ -29,6 +29,7 @@ FLOAT_HALF_LIFE_DAYS = 12.0
 MAX_DRIFT_DAYS = 20
 SNAP_KM = 15.0
 TIME_STEP_SECONDS = 3600
+READER_MAX_SPEED_MS = 300.0
 
 GEAR_WEIGHTS: dict[str, float] = {
     "trawlers": 1.0,
@@ -224,6 +225,7 @@ def simulate(
     root.setLevel(level)
     model.add_reader(readers)
     model.set_config("general:coastline_action", "stranding")
+    model.set_config("drift:max_speed", READER_MAX_SPEED_MS)
     model.set_config("drift:advection_scheme", "runge-kutta")
     model.set_config("drift:stokes_drift", True)
     model.set_config(
@@ -287,7 +289,7 @@ def run(session: Session, day: date) -> int:
         raise NotReady(f"no vessel positions stored for {day}")
 
     horizon = start + timedelta(days=MAX_DRIFT_DAYS)
-    files, end = cmems.forcing(start, horizon)
+    currents, waves, end = cmems.forcing(start, horizon)
     needed = min(horizon, midnight(date.today()))
     if end < max(needed, stop):
         raise NotReady(
@@ -299,7 +301,10 @@ def run(session: Session, day: date) -> int:
 
     index = load_segments(session)
     started = time.monotonic()
-    readers = [reader_netCDF_CF_generic.Reader(str(file)) for file in files]
+    readers = [
+        reader_netCDF_CF_generic.Reader([str(file) for file in files])
+        for files in (currents, waves)
+    ]
     readers.append(reader_netCDF_CF_generic.Reader(wind_field(session, start, end)))
     result = simulate(seeds(positions, day), readers, start, end, coast(index, SNAP_KM))
 

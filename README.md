@@ -94,13 +94,13 @@ From 2022 to today, measured per unit on one worker:
 
 | kind | per unit | total |
 |---|---|---|
-| `cmems` | ~6 min per 10-day chunk | ~17 h |
+| `cmems` | ~10 min per 10-day chunk | ~1 day |
 | `gfw` | ~20 s per day | ~9 h |
-| `drift` | ~4 min per day | ~5 days |
+| `drift` | ~3.5 min per day | ~4 days |
 | `risk` | < 1 s per day | minutes |
 
-Drift dominates and is CPU-bound, so it scales with workers: six bring the
-whole backfill to about a day.
+Drift is CPU-bound and CMEMS is bound by download speed; both scale with
+workers, so six bring the whole backfill to about a day.
 
 ## The drift model
 
