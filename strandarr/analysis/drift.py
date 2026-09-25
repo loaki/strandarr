@@ -19,6 +19,7 @@ from strandarr.sources import cmems
 from strandarr.timeframe import DayRange, midnight
 
 logger = logging.getLogger(__name__)
+logging.getLogger("opendrift").setLevel(logging.WARNING)
 
 WIND_DRIFT_FACTOR = 0.012
 WIND_DRIFT_SPREAD = 0.004
@@ -216,7 +217,11 @@ def simulate(
 
     from opendrift.models.oceandrift import OceanDrift
 
-    model = OceanDrift(loglevel=50)
+    root = logging.getLogger()
+    handlers, level = root.handlers[:], root.level
+    model = OceanDrift(loglevel=logging.WARNING)
+    root.handlers = handlers
+    root.setLevel(level)
     model.add_reader(readers)
     model.set_config("general:coastline_action", "stranding")
     model.set_config("drift:advection_scheme", "runge-kutta")
