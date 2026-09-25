@@ -76,8 +76,12 @@ def _window(at: datetime) -> tuple[datetime, datetime]:
     return start, start + timedelta(hours=1)
 
 
+def _fields(item: Any, fields: Sequence[str]) -> dict[str, Any]:
+    return {field: getattr(item, field) for field in fields}
+
+
 def _rows(items: Sequence[Any], fields: Sequence[str]) -> list[dict[str, Any]]:
-    return [{field: getattr(item, field) for field in fields} for item in items]
+    return [_fields(item, fields) for item in items]
 
 
 @app.get("/api/range")
@@ -202,7 +206,7 @@ def get_vessels(at: Hour, db: Db) -> list[dict[str, Any]]:
         .where(VesselPosition.recorded_at >= start, VesselPosition.recorded_at < end)
     ).all()
     return [
-        {**_rows([position], POSITION_FIELDS)[0], **_rows([vessel], VESSEL_FIELDS)[0]}
+        {**_fields(position, POSITION_FIELDS), **_fields(vessel, VESSEL_FIELDS)}
         for position, vessel in rows
     ]
 

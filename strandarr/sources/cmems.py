@@ -22,7 +22,6 @@ logger = logging.getLogger(__name__)
 logging.getLogger("copernicusmarine").setLevel(logging.WARNING)
 
 DAYS_PER_CHUNK = 10
-FORECAST_DAYS = 10
 COVERAGE_TTL_SECONDS = 3600
 MARGIN_DEG = 0.2
 
@@ -105,7 +104,7 @@ def choose(product: Product, start: datetime, end: datetime) -> str | None:
     usable = []
     for dataset in product.datasets:
         first, last = coverage(dataset)
-        if first > start:
+        if first > start or last < start:
             continue
         if last >= end - timedelta(hours=1):
             return dataset
@@ -148,6 +147,8 @@ def download(product: Product, chunk: date, start: datetime, end: datetime) -> P
         **_credentials(),
     )
     partial.replace(target)
+    for leftover in partial.parent.glob(f"{partial.name}.*"):
+        leftover.unlink()
     logger.info(
         "cmems %s: %s from %s in %.0fs",
         product.name,
@@ -158,21 +159,28 @@ def download(product: Product, chunk: date, start: datetime, end: datetime) -> P
     return target
 
 
+def _grid_index(values: object, origin: float) -> Int:
+    degrees = np.asarray(values, dtype=np.float64)
+    return np.asarray(np.rint((degrees - origin) / GRID.step_deg), dtype=np.int32)
+
+
 class Binning:
     def __init__(self, dataset: xr.Dataset, cells: list[tuple[int, float, float]]):
-        position = {GRID.cell(lat, lon): i for i, (_, lat, lon) in enumerate(cells)}
-        lats = dataset.latitude.values.astype(np.float64)
-        lons = dataset.longitude.values.astype(np.float64)
-        step = GRID.step_deg
-        rows = np.rint((lats - GRID.bbox.min_lat) / step)
-        columns = np.rint((lons - GRID.bbox.min_lon) / step)
-        target = np.full((len(lats), len(lons)), -1, dtype=np.int32)
-        for i, row in enumerate(rows):
-            for j, column in enumerate(columns):
-                key = GRID.cell(
-                    GRID.bbox.min_lat + row * step, GRID.bbox.min_lon + column * step
-                )
-                target[i, j] = position.get(key, -1)
+        min_lat, min_lon = GRID.bbox.min_lat, GRID.bbox.min_lon
+        cell_rows = _grid_index([lat for _, lat, _ in cells], min_lat)
+        cell_columns = _grid_index([lon for _, _, lon in cells], min_lon)
+        lookup = np.full(
+            (cell_rows.max() + 1, cell_columns.max() + 1), -1, dtype=np.int32
+        )
+        lookup[cell_rows, cell_columns] = np.arange(len(cells), dtype=np.int32)
+        rows = _grid_index(dataset.latitude.values, min_lat)
+        columns = _grid_index(dataset.longitude.values, min_lon)
+        row_ok = (rows >= 0) & (rows < lookup.shape[0])
+        column_ok = (columns >= 0) & (columns < lookup.shape[1])
+        target = np.full((len(rows), len(columns)), -1, dtype=np.int32)
+        target[np.ix_(row_ok, column_ok)] = lookup[
+            np.ix_(rows[row_ok], columns[column_ok])
+        ]
         self.target: Int = target.ravel()
         self.cells = len(cells)
         self.times = [_instant(value) for value in dataset.time.values]
@@ -279,15 +287,19 @@ def archive(session: Session, days: DayRange) -> int:
     chunk = chunk_of(days.start)
     start, end = days.bounds()
     cells = load_cells(session)
-    files = {product.name: download(product, chunk, start, end) for product in PRODUCTS}
+    currents_file = download(CURRENTS, chunk, start, end)
+    waves_file = download(WAVES, chunk, start, end)
     with (
-        xr.open_dataset(files[CURRENTS.name]) as currents,
-        xr.open_dataset(files[WAVES.name]) as waves,
-        xr.open_dataset(files[WIND.name]) as wind,
+        xr.open_dataset(currents_file) as currents,
+        xr.open_dataset(waves_file) as waves,
     ):
         sea = sea_rows(currents, waves, cells)
-        winds = wind_rows(wind, cells)
-    files[WIND.name].unlink()
+    winds: list[Wind] = []
+    if choose(WIND, start, end) is not None:
+        wind_file = download(WIND, chunk, start, end)
+        with xr.open_dataset(wind_file) as wind:
+            winds = wind_rows(wind, cells)
+        wind_file.unlink()
     written = upsert(session, Sea, sea, overwrite=True)
     written += upsert(session, Wind, winds, overwrite=True)
     session.commit()

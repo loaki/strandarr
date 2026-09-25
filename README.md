@@ -30,7 +30,7 @@ partly ingested for ever while the job reads `done`.
 | kind | what it does | window |
 |---|---|---|
 | `gfw` | fishing effort per vessel-hour | from 2012, 4-day lag |
-| `cmems` | currents, Stokes drift, waves and wind from Copernicus Marine | from 2022, 10-day chunks, 10 days ahead |
+| `cmems` | currents, Stokes drift, waves and wind from Copernicus Marine | from 2022, 10-day chunks, forecast days ahead |
 | `forecast` | wind forecast from Open-Meteo | rolling, re-run daily |
 | `strandings_gbif` | Pelagis archive via GBIF | up to 2022, yearly chunks |
 | `strandings_pelagis` | Pelagis histo-carto | from 2023, 30-day chunks |

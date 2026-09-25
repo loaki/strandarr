@@ -112,7 +112,7 @@ TASKS: dict[str, Spec] = {
     "cmems": Spec(
         run=cmems.archive,
         first=FIRST_DAY,
-        ahead=cmems.FORECAST_DAYS,
+        ahead=settings.forecast_hours // 24,
         chunk=cmems.DAYS_PER_CHUNK,
         volatile=CMEMS_VOLATILE_DAYS,
     ),
