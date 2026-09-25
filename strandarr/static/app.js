@@ -771,10 +771,11 @@ function buildTimeline(start, end) {
     tick.scrollIntoView({ inline: "center", block: "nearest" });
   });
 
-  const last = hours[hours.length - 1];
-  const lastTick = track.querySelector(`[data-hour="${fmtHour(last)}"]`);
-  selectHour(last, lastTick);
-  lastTick.scrollIntoView({ inline: "end", block: "nearest" });
+  const target = new Date(now.getTime() - 3600 * 1000);
+  const initial = hours.findLast((hour) => hour <= target) ?? hours[0];
+  const initialTick = track.querySelector(`[data-hour="${fmtHour(initial)}"]`);
+  selectHour(initial, initialTick);
+  initialTick.scrollIntoView({ inline: "center", block: "nearest" });
 }
 
 async function selectHour(hour, tick) {
