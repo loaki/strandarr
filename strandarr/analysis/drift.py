@@ -19,7 +19,7 @@ from strandarr.sources import cmems
 from strandarr.timeframe import DayRange, midnight
 
 logger = logging.getLogger(__name__)
-logging.getLogger("opendrift").setLevel(logging.WARNING)
+logging.getLogger("opendrift").setLevel(logging.ERROR)
 
 WIND_DRIFT_FACTOR = 0.012
 WIND_DRIFT_SPREAD = 0.004
@@ -188,6 +188,7 @@ def wind_field(session: Session, start: datetime, end: datetime) -> xr.Dataset:
 class Result:
     landed: dict[tuple[date, int], float]
     particles: int
+    lost: int
     released: float
     stranded: float
     hours: int
@@ -202,7 +203,7 @@ def simulate(
 ) -> Result:
     hours = int((end - start).total_seconds() // 3600)
     if not seed_list:
-        return Result({}, 0, 0.0, 0.0, hours)
+        return Result({}, 0, 0, 0.0, 0.0, hours)
     rng = np.random.default_rng(0)
     per_seed = max(
         MIN_PARTICLES_PER_SEED, min(PARTICLES_PER_SEED, MAX_PARTICLES // len(seed_list))
@@ -220,7 +221,7 @@ def simulate(
 
     root = logging.getLogger()
     handlers, level = root.handlers[:], root.level
-    model = OceanDrift(loglevel=logging.WARNING)
+    model = OceanDrift(loglevel=logging.ERROR)
     root.handlers = handlers
     root.setLevel(level)
     model.add_reader(readers)
@@ -240,14 +241,16 @@ def simulate(
         wind_drift_factor=windage,
         z=0,
     )
-    model.run(
-        end_time=end.replace(tzinfo=None),
-        time_step=TIME_STEP_SECONDS,
-        time_step_output=hours * 3600,
-    )
+    with np.errstate(divide="ignore", invalid="ignore"):
+        model.run(
+            end_time=end.replace(tzinfo=None),
+            time_step=TIME_STEP_SECONDS,
+            time_step_output=hours * 3600,
+        )
 
     gone = model.elements_deactivated
     stranded = gone.status == model.status_categories.index("stranded")
+    lost = gone.status == model.status_categories.index("missing_data")
     index = gone.ID[stranded].astype(np.int64) - 1
     age_hours = gone.age_seconds[stranded] / 3600.0
     landed_weight = weight[index] * 0.5 ** (age_hours / (FLOAT_HALF_LIFE_DAYS * 24))
@@ -266,6 +269,7 @@ def simulate(
     return Result(
         landed=landed,
         particles=count,
+        lost=int(lost.sum()),
         released=float(weight.sum()),
         stranded=float(landed_weight[near].sum()),
         hours=hours,
@@ -324,10 +328,12 @@ def run(session: Session, day: date) -> int:
     )
     session.commit()
     logger.info(
-        "drift %s: %d particle(s), %.3f released -> %.3f stranded on %d segment-day(s), "
+        "drift %s: %d particle(s) (%d lost: no currents), %.3f released -> %.3f "
+        "stranded on %d segment-day(s), "
         "%dh of forcing in %.0fs%s",
         day,
         result.particles,
+        result.lost,
         result.released,
         result.stranded,
         len(result.landed),
