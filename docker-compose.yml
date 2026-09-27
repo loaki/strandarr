@@ -1,3 +1,5 @@
+name: strandarr
+
 services:
   db:
     image: postgres:16
@@ -89,7 +91,8 @@ services:
       FORCING_DIR: /app/forcing
     volumes:
       - model_data:/app/data
-      - forcing_data:/app/forcing
+      # FORCING_HOST_DIR (absolute path) keeps the files on another disk.
+      - ${FORCING_HOST_DIR:-forcing_data}:/app/forcing
     command: [ "strandarr", "work" ]
     depends_on:
       init:
