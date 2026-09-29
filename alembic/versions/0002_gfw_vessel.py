@@ -19,7 +19,6 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.alter_column("vessel", "mmsi", existing_type=sa.String(length=16), nullable=True)
     op.create_table(
         "gfw_vessel",
         sa.Column("gfw_id", sa.String(length=64), nullable=False),
@@ -33,7 +32,3 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.drop_index("ix_gfw_vessel_vessel_id", table_name="gfw_vessel")
     op.drop_table("gfw_vessel")
-    op.execute("DELETE FROM vessel WHERE mmsi IS NULL")
-    op.alter_column(
-        "vessel", "mmsi", existing_type=sa.String(length=16), nullable=False
-    )
