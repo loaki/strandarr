@@ -512,7 +512,7 @@ def fit(session: Session, seed: int = 0) -> Model:
     columns.append(logit(seasonal[rows]) - past.baseline)
     beta = irls(np.column_stack(columns), target[rows])
 
-    intercept = float(beta[0]) - float(np.log(keep / max(len(misses), 1)))
+    intercept = float(beta[0]) + float(np.log(keep / max(len(misses), 1)))
     model = Model(
         intercept=intercept,
         weights=dict(

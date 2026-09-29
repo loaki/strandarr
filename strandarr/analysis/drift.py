@@ -251,7 +251,7 @@ def simulate(
     gone = model.elements_deactivated
     stranded = gone.status == model.status_categories.index("stranded")
     lost = gone.status == model.status_categories.index("missing_data")
-    index = gone.ID[stranded].astype(np.int64) - 1
+    index = gone.ID[stranded].astype(np.int64)
     age_hours = gone.age_seconds[stranded] / 3600.0
     landed_weight = weight[index] * 0.5 ** (age_hours / (FLOAT_HALF_LIFE_DAYS * 24))
     landed_hour = birth[index] + age_hours

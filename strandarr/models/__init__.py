@@ -2,6 +2,7 @@ from strandarr.models.base import Base, utc_now
 from strandarr.models.cell import Cell
 from strandarr.models.coastal_segment import CoastalSegment
 from strandarr.models.drift_daily import DriftDaily
+from strandarr.models.gfw_vessel import GfwVessel
 from strandarr.models.job import Job, JobStatus
 from strandarr.models.sea import Sea
 from strandarr.models.segment_risk import SegmentRisk
@@ -15,6 +16,7 @@ __all__ = [
     "Cell",
     "CoastalSegment",
     "DriftDaily",
+    "GfwVessel",
     "Job",
     "JobStatus",
     "Sea",
