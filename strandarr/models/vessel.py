@@ -19,7 +19,7 @@ class Vessel(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    mmsi: Mapped[str] = mapped_column(String(16), nullable=False)
+    mmsi: Mapped[str | None] = mapped_column(String(16))
     ship_name: Mapped[str | None] = mapped_column(String(128))
     flag: Mapped[str | None] = mapped_column(String(8))
     gear_type: Mapped[str | None] = mapped_column(String(64))

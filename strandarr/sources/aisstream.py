@@ -120,7 +120,10 @@ def _hour(at: datetime) -> datetime:
 
 def _roster() -> Fleet:
     with unit_of_work() as session:
-        return dict(session.execute(select(Vessel.mmsi, Vessel.id)).tuples().all())
+        rows = session.execute(
+            select(Vessel.mmsi, Vessel.id).where(Vessel.mmsi.is_not(None))
+        )
+        return {mmsi: vessel_id for mmsi, vessel_id in rows.tuples() if mmsi}
 
 
 def _rows(positions: dict[Key, Position], fleet: Fleet) -> list[VesselPosition]:

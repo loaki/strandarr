@@ -62,11 +62,11 @@ Position = dict[str, Any]
 
 @dataclass(frozen=True)
 class Identity:
-    mmsi: str
-    ship_name: str | None
-    flag: str | None
-    gear_type: str | None
-    vessel_type: str | None
+    mmsi: str | None = None
+    ship_name: str | None = None
+    flag: str | None = None
+    gear_type: str | None = None
+    vessel_type: str | None = None
 
 
 def parse(row: dict[str, Any]) -> Position | None:
@@ -111,18 +111,17 @@ def _entry_identities(entry: dict[str, Any]) -> dict[str, Identity]:
     reported = [
         info for info in entry.get("selfReportedInfo") or [] if info.get("ssvid")
     ]
-    if not reported:
-        return {}
-    current = max(
+    current: dict[str, Any] = max(
         reported,
         key=lambda info: (
             bool(info.get("latestVesselInfo")),
             info.get("transmissionDateTo") or "",
         ),
+        default={},
     )
     return {
         combined["vesselId"]: Identity(
-            mmsi=str(current["ssvid"]),
+            mmsi=str(current["ssvid"]) if current else None,
             ship_name=current.get("shipname") or None,
             flag=current.get("flag") or None,
             gear_type=_newest(combined.get("geartypes")),
@@ -150,22 +149,45 @@ def identities(client: httpx.Client, gfw_ids: list[str]) -> dict[str, Identity]:
 def register(session: Session, found: dict[str, Identity]) -> dict[str, int]:
     if not found:
         return {}
+    mapping: dict[str, int] = {}
     by_mmsi: dict[str, dict[str, str | None]] = {}
     for identity in found.values():
+        if identity.mmsi is None:
+            continue
         merged = by_mmsi.setdefault(identity.mmsi, {})
         for field, value in asdict(identity).items():
             if merged.get(field) is None:
                 merged[field] = value
-    values = insert(Vessel).values(list(by_mmsi.values()))
-    statement = values.on_conflict_do_update(
-        index_elements=["mmsi"],
-        set_={
-            field: func.coalesce(values.excluded[field], Vessel.__table__.c[field])
-            for field in Vessel.IDENTITY
-        },
-    ).returning(Vessel.mmsi, Vessel.id)
-    stored = dict(session.execute(statement).tuples().all())
-    mapping = {gfw_id: stored[identity.mmsi] for gfw_id, identity in found.items()}
+    if by_mmsi:
+        values = insert(Vessel).values(list(by_mmsi.values()))
+        statement = values.on_conflict_do_update(
+            index_elements=["mmsi"],
+            set_={
+                field: func.coalesce(values.excluded[field], Vessel.__table__.c[field])
+                for field in Vessel.IDENTITY
+            },
+        ).returning(Vessel.mmsi, Vessel.id)
+        stored = dict(session.execute(statement).tuples().all())
+        mapping.update(
+            {
+                gfw_id: stored[identity.mmsi]
+                for gfw_id, identity in found.items()
+                if identity.mmsi is not None
+            }
+        )
+    anonymous = [
+        (gfw_id, identity)
+        for gfw_id, identity in found.items()
+        if identity.mmsi is None
+    ]
+    if anonymous:
+        ids = session.scalars(
+            insert(Vessel).returning(Vessel.id, sort_by_parameter_order=True),
+            [asdict(identity) for _, identity in anonymous],
+        ).all()
+        mapping.update(
+            {gfw_id: v for (gfw_id, _), v in zip(anonymous, ids, strict=True)}
+        )
     session.execute(
         insert(GfwVessel)
         .values([{"gfw_id": gfw_id, "vessel_id": v} for gfw_id, v in mapping.items()])
@@ -190,13 +212,18 @@ def resolve(
     known = _known(session, wanted)
     unknown = [gfw_id for gfw_id in wanted if gfw_id not in known]
     if unknown:
-        found = register(session, identities(client, unknown))
-        known.update(found)
-        for gfw_id in unknown:
-            if gfw_id not in found:
-                logger.error("gfw: no mmsi found for vessel %s, skipping it", gfw_id)
+        fetched = identities(client, unknown)
+        found = {gfw_id: fetched.get(gfw_id, Identity()) for gfw_id in unknown}
+        for gfw_id, identity in found.items():
+            if identity.mmsi is None:
+                logger.error(
+                    "gfw: no mmsi found for vessel %s, adding it without one", gfw_id
+                )
+        known.update(register(session, found))
         logger.info(
-            "gfw: looked up %d new vessel(s), %d resolved", len(unknown), len(found)
+            "gfw: looked up %d new vessel(s), %d with an mmsi",
+            len(unknown),
+            sum(identity.mmsi is not None for identity in found.values()),
         )
     return [
         {**cell, "vessel_id": known[cell["gfw_id"]]}
